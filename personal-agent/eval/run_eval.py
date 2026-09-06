@@ -19,6 +19,7 @@ def run_eval():
     print("=" * 60)
 
     correct_count = 0
+    retry_count = 0
     results = []
 
     start_time = time.time()
@@ -30,28 +31,34 @@ def run_eval():
         try:
             res = call_agent(user_input)
             got = res.tool
+            was_retried = getattr(res, "_was_retried", False)
+            if was_retried:
+                retry_count += 1
             is_correct = (got == expected)
             if is_correct:
                 correct_count += 1
-                status = "✅ PASS"
+                status = "PASS"
             else:
-                status = "❌ FAIL"
+                status = "FAIL"
             
-            print(f"[{idx:02d}/{len(test_cases)}] {status} | Expected: {expected:<12} | Got: {got:<12} | Input: {user_input}")
+            retry_flag = " (RETRIED)" if was_retried else ""
+            print(f"[{idx:02d}/{len(test_cases)}] {status:<4} | Expected: {expected:<12} | Got: {got:<12}{retry_flag} | Input: {user_input}")
             results.append({
                 "input": user_input,
                 "expected": expected,
                 "got": got,
                 "correct": is_correct,
+                "was_retried": was_retried,
                 "reasoning": res.reasoning
             })
         except Exception as e:
-            print(f"[{idx:02d}/{len(test_cases)}] 💥 ERROR | Expected: {expected:<12} | Error: {e}")
+            print(f"[{idx:02d}/{len(test_cases)}] ERROR| Expected: {expected:<12} | Error: {e}")
             results.append({
                 "input": user_input,
                 "expected": expected,
                 "error": str(e),
-                "correct": False
+                "correct": False,
+                "was_retried": False
             })
 
     elapsed = time.time() - start_time
@@ -60,6 +67,7 @@ def run_eval():
     print("\n" + "=" * 60)
     print(f"  Evaluation Summary")
     print(f"  Accuracy: {accuracy:.1f}% ({correct_count}/{len(test_cases)})")
+    print(f"  Cases Requiring Retry: {retry_count}/{len(test_cases)}")
     print(f"  Total Time: {elapsed:.2f}s (Avg: {elapsed/len(test_cases):.2f}s/case)")
     print("=" * 60)
 

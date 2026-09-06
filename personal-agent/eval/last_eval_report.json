@@ -1,0 +1,245 @@
+{
+  "accuracy": 93.33333333333333,
+  "elapsed": 457.76710772514343,
+  "results": [
+    {
+      "input": "Email john@gmail.com that I'll be late for the meeting tomorrow",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Send an email to sarah@example.com about the project status update",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Tell boss@company.com via email that the quarter results are ready",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Draft an email to mike@test.com titled Invoice and body Here is the invoice",
+      "expected": "send_email",
+      "got": "none",
+      "correct": false,
+      "was_retried": false,
+      "reasoning": "Email ID was not explicitly provided in the user's input message (prevented hallucination)."
+    },
+    {
+      "input": "Email team@startup.io to confirm Friday lunch at 12pm",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Send email to alice@xyz.com saying thanks for the presentation",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Write an email to dave@work.com asking for the design files",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Email info@hotel.com requesting confirmation of my booking",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Send an email to support@github.com regarding account billing issue",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Email manager@corp.com asking for approval on vacation leave",
+      "expected": "send_email",
+      "got": "send_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit recipient email address and clear topic for a new email."
+    },
+    {
+      "input": "Send an email to my boss",
+      "expected": "none",
+      "got": "none",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "No real email address was provided for 'my boss' and an email address must never be guessed or fabricated, so tool 'none' is used."
+    },
+    {
+      "input": "Draft an email for me",
+      "expected": "none",
+      "got": "none",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Missing recipient email address and email body content."
+    },
+    {
+      "input": "Email John about the project",
+      "expected": "none",
+      "got": "none",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Missing recipient email address and specific message content."
+    },
+    {
+      "input": "Can you email someone for me?",
+      "expected": "none",
+      "got": "none",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Missing recipient email address and email body content."
+    },
+    {
+      "input": "Send message to Sarah",
+      "expected": "none",
+      "got": "none",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Missing recipient email address and email body content."
+    },
+    {
+      "input": "What's up agent?",
+      "expected": "none",
+      "error": "1 validation error for ToolCall\nreasoning\n  Field required [type=missing, input_value={'tool': 'none', 'args': ...ific action or query.'}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/missing",
+      "correct": false,
+      "was_retried": false
+    },
+    {
+      "input": "Who created you?",
+      "expected": "none",
+      "got": "none",
+      "correct": true,
+      "was_retried": true,
+      "reasoning": "The prompt is too vague and does not provide enough context for a specific tool to be chosen."
+    },
+    {
+      "input": "Can you help me organize my inbox?",
+      "expected": "none",
+      "got": "none",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "General conversational request without a specific search query or action."
+    },
+    {
+      "input": "Check my inbox for emails about invoice",
+      "expected": "search_inbox",
+      "got": "search_inbox",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "User requested a specific keyword search in their inbox."
+    },
+    {
+      "input": "Did anyone email me about the contract?",
+      "expected": "search_inbox",
+      "got": "search_inbox",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "User is asking about a specific topic in their inbox, so search_inbox is the most suitable tool to find relevant emails."
+    },
+    {
+      "input": "Search emails from boss@company.com",
+      "expected": "search_inbox",
+      "got": "search_inbox",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided a specific email address to search for in the inbox."
+    },
+    {
+      "input": "Find emails with subject meeting",
+      "expected": "search_inbox",
+      "got": "search_inbox",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "User requested a specific keyword to search the inbox, so tool 'search_inbox' is used."
+    },
+    {
+      "input": "Look for unread emails in my inbox",
+      "expected": "search_inbox",
+      "got": "search_inbox",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "User requested a search query for unread emails in their inbox, so tool 'search_inbox' is used."
+    },
+    {
+      "input": "Search for payment receipts",
+      "expected": "search_inbox",
+      "got": "search_inbox",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "User is requesting a specific search query to find emails related to payment receipts, which is a clear and actionable task."
+    },
+    {
+      "input": "Did Alice send me any emails today?",
+      "expected": "search_inbox",
+      "got": "search_inbox",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "User is asking for a specific sender's emails, so search_inbox is the most suitable tool."
+    },
+    {
+      "input": "Read email id msg12345",
+      "expected": "read_email",
+      "got": "read_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "Provided explicit email ID to read the content of a specific email."
+    },
+    {
+      "input": "Show full body of email ID 98765",
+      "expected": "read_email",
+      "got": "read_email",
+      "correct": true,
+      "was_retried": false,
+      "reasoning": "User requested to read the full content of a specific email by ID, so tool 'read_email' is used."
+    },
+    {
+      "input": "Draft a reply to email ID msg101 saying I agree with the proposal",
+      "expected": "draft_reply",
+      "got": "draft_reply",
+      "correct": true,
+      "was_retried": true,
+      "reasoning": "Provided explicit email_id to reply to, so draft_reply is used instead of send_email."
+    },
+    {
+      "input": "Reply to email 404 telling them I'm away until Monday",
+      "expected": "draft_reply",
+      "got": "draft_reply",
+      "correct": true,
+      "was_retried": true,
+      "reasoning": "Providing explicit email_id to reply to, so draft_reply is used instead of send_email."
+    },
+    {
+      "input": "Draft reply for message 555 saying thanks",
+      "expected": "draft_reply",
+      "got": "draft_reply",
+      "correct": true,
+      "was_retried": true,
+      "reasoning": "Provided explicit email_id to reply to, so draft_reply is used instead of send_email."
+    }
+  ]
+}

@@ -79,3 +79,8 @@ The agent will:
 - Change `CHECK_INTERVAL_MINUTES` in config.py to check more/less often
 - Add emails to `VIP_SENDERS` to always forward them regardless of LLM decision
 - Change `OLLAMA_MODEL` if you want to try a different model
+
+## Known Limitations
+
+- **Draft Revision Consistency**: Small local LLMs (e.g. `llama3.2:3b`) can occasionally claim a draft change was made in their reasoning without actually modifying the output text. The system detects when a regenerated draft is identical to the original and flags this to the user with a note ("I couldn't confidently make that change — could you rephrase what you'd like edited?") rather than presenting an unchanged draft as a successful edit.
+

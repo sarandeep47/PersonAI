@@ -134,7 +134,11 @@ def handle_message(chat_id: str, text: str):
         
         tool_call = revise_draft(draft, text)
         if tool_call.tool == "send_email":
-            _present_email_confirmation(chat_id, tool_call.args)
+            if tool_call.args.get("is_unchanged"):
+                send_telegram_message("⚠️ I couldn't confidently make that change — could you rephrase what you'd like edited?", chat_id=chat_id)
+                _present_email_confirmation(chat_id, draft)
+            else:
+                _present_email_confirmation(chat_id, tool_call.args)
         else:
             send_telegram_message(tool_call.args.get("message", "Could not revise draft."), chat_id=chat_id)
         return
