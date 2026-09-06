@@ -1,0 +1,36 @@
+[
+  {"input": "Email john@gmail.com that I'll be late for the meeting tomorrow", "expected_tool": "send_email"},
+  {"input": "Send an email to sarah@example.com about the project status update", "expected_tool": "send_email"},
+  {"input": "Tell boss@company.com via email that the quarter results are ready", "expected_tool": "send_email"},
+  {"input": "Draft an email to mike@test.com titled Invoice and body Here is the invoice", "expected_tool": "send_email"},
+  {"input": "Email team@startup.io to confirm Friday lunch at 12pm", "expected_tool": "send_email"},
+  {"input": "Send email to alice@xyz.com saying thanks for the presentation", "expected_tool": "send_email"},
+  {"input": "Write an email to dave@work.com asking for the design files", "expected_tool": "send_email"},
+  {"input": "Email info@hotel.com requesting confirmation of my booking", "expected_tool": "send_email"},
+  {"input": "Send an email to support@github.com regarding account billing issue", "expected_tool": "send_email"},
+  {"input": "Email manager@corp.com asking for approval on vacation leave", "expected_tool": "send_email"},
+
+  {"input": "Send an email to my boss", "expected_tool": "none"},
+  {"input": "Draft an email for me", "expected_tool": "none"},
+  {"input": "Email John about the project", "expected_tool": "none"},
+  {"input": "Can you email someone for me?", "expected_tool": "none"},
+  {"input": "Send message to Sarah", "expected_tool": "none"},
+  {"input": "What's up agent?", "expected_tool": "none"},
+  {"input": "Who created you?", "expected_tool": "none"},
+  {"input": "Can you help me organize my inbox?", "expected_tool": "none"},
+
+  {"input": "Check my inbox for emails about invoice", "expected_tool": "search_inbox"},
+  {"input": "Did anyone email me about the contract?", "expected_tool": "search_inbox"},
+  {"input": "Search emails from boss@company.com", "expected_tool": "search_inbox"},
+  {"input": "Find emails with subject meeting", "expected_tool": "search_inbox"},
+  {"input": "Look for unread emails in my inbox", "expected_tool": "search_inbox"},
+  {"input": "Search for payment receipts", "expected_tool": "search_inbox"},
+  {"input": "Did Alice send me any emails today?", "expected_tool": "search_inbox"},
+
+  {"input": "Read email id msg12345", "expected_tool": "read_email"},
+  {"input": "Show full body of email ID 98765", "expected_tool": "read_email"},
+
+  {"input": "Draft a reply to email ID msg101 saying I agree with the proposal", "expected_tool": "draft_reply"},
+  {"input": "Reply to email 404 telling them I'm away until Monday", "expected_tool": "draft_reply"},
+  {"input": "Draft reply for message 555 saying thanks", "expected_tool": "draft_reply"}
+]
