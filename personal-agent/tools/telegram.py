@@ -132,3 +132,32 @@ def notify_telegram(message: str) -> str:
     if success:
         return "Telegram notification sent successfully."
     return "Failed to send Telegram notification."
+
+
+def send_telegram_document(file_path: str, caption: str = None, chat_id: str = None) -> bool:
+    """
+    Send a document file to Telegram chat via sendDocument Bot API.
+    Returns True on success, False on failure.
+    """
+    if not file_path or not os.path.exists(file_path):
+        print(f"[Telegram] Document file not found: {file_path}")
+        return False
+
+    target_chat_id = chat_id or config.TELEGRAM_CHAT_ID
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendDocument"
+    
+    try:
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": target_chat_id}
+            if caption:
+                data["caption"] = caption
+                data["parse_mode"] = "Markdown"
+            res = requests.post(url, data=data, files=files, timeout=30)
+            res.raise_for_status()
+            print(f"[Telegram] Successfully sent document: {os.path.basename(file_path)}")
+            return True
+    except Exception as e:
+        print(f"[Telegram] Error sending document {file_path}: {e}")
+        return False
+

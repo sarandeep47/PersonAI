@@ -18,10 +18,16 @@ class DraftReplyArgs(BaseModel):
     email_id: str = Field(..., description="ID of the email to reply to")
     instructions: str = Field(..., description="What to say in the reply")
 
+class ExportContactsArgs(BaseModel):
+    pass
+
+class DeleteContactArgs(BaseModel):
+    query: str = Field(..., description="Name, nickname, or role of the contact to delete (e.g. 'hr', 'John')")
+
 class NoneArgs(BaseModel):
     message: str = Field(..., description="Response/question to show to the user")
 
-ToolName = Literal["send_email", "search_inbox", "read_email", "draft_reply", "none"]
+ToolName = Literal["send_email", "search_inbox", "read_email", "draft_reply", "export_contacts", "delete_contact", "none"]
 
 class ToolCall(BaseModel):
     tool: ToolName

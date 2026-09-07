@@ -122,6 +122,34 @@ class TestToolCallValidation(unittest.TestCase):
         self.assertEqual(tc.tool, "send_email")
         self.assertEqual(tc.reasoning, "No reasoning provided.")
 
+    def test_validate_tool_call_history_context(self):
+        """Verify validate_tool_call checks history context for recipient email address."""
+        history = [
+            {"role": "user", "content": "email sarandeep8355@gmail.com about tomorrow's holiday"},
+            {"role": "assistant", "content": "Drafted email to sarandeep8355@gmail.com with subject 'Holiday'"}
+        ]
+        followup_msg = "use Sade my name and attach photo"
+        tc = ToolCall(
+            tool="send_email",
+            args={"to": "sarandeep8355@gmail.com", "subject": "Holiday", "body": "Hello Sarandeep"},
+            reasoning="Valid recipient in history context."
+        )
+        validated = validate_tool_call(tc, followup_msg, history=history)
+        self.assertEqual(validated.tool, "send_email")
+        self.assertEqual(validated.args.get("to"), "sarandeep8355@gmail.com")
+
+    def test_get_latest_pending_draft(self):
+        """Verify db.get_latest_pending_draft retrieves draft payload."""
+        import db.session as db
+        chat_id = "test_chat_99"
+        payload = {"to": "test@example.com", "subject": "Test", "body": "Body"}
+        db.save_pending_action("draft_test123", chat_id, "confirm_send", payload)
+        
+        draft = db.get_latest_pending_draft(chat_id)
+        self.assertIsNotNone(draft)
+        self.assertEqual(draft["to"], "test@example.com")
+        db.delete_pending_action("draft_test123")
+
 
 if __name__ == "__main__":
     unittest.main()
