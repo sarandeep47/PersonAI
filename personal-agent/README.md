@@ -83,4 +83,5 @@ The agent will:
 ## Known Limitations
 
 - **Draft Revision Consistency**: Small local LLMs (e.g. `llama3.2:3b`) can occasionally claim a draft change was made in their reasoning without actually modifying the output text. The system detects when a regenerated draft is identical to the original and flags this to the user with a note ("I couldn't confidently make that change — could you rephrase what you'd like edited?") rather than presenting an unchanged draft as a successful edit.
+- **Output Quality Variance**: Because this project uses a small local model (`llama3.2:3b`) rather than a large cloud model, email draft quality and specificity can vary between runs of the identical input due to sampling randomness — e.g. sometimes using a generic 'Dear All' greeting instead of the actual recipient's name. Confirmed via repeated-run testing. This is an inherent tradeoff of local-first inference (privacy, zero API cost, offline capability) versus larger cloud models, not a code defect.
 

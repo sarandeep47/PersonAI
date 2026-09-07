@@ -34,14 +34,26 @@ def is_email_important(email: dict) -> tuple[bool, str, str]:
     return False, "Could not determine importance", "skip"
 
 
-def filter_emails_batch(emails: list[dict]) -> list[tuple[bool, str, str]]:
+def filter_emails_batch(emails: list[dict], batch_size: int = 5) -> list[tuple[bool, str, str]]:
     """
-    Filter a batch of emails in one LLM call with 4-tier categorization.
+    Filter a batch of emails using small sub-batches (default 5 emails per LLM call)
+    to prevent local Ollama read timeouts.
     Returns list of (is_important, reason, tier) tuples.
     """
     if not emails:
         return []
 
+    all_results = []
+    for i in range(0, len(emails), batch_size):
+        chunk = emails[i:i + batch_size]
+        chunk_results = _filter_emails_chunk(chunk)
+        all_results.extend(chunk_results)
+
+    return all_results
+
+
+def _filter_emails_chunk(emails: list[dict]) -> list[tuple[bool, str, str]]:
+    """Filter a single small chunk of emails in one LLM call."""
     emails_text = ""
     for i, e in enumerate(emails, 1):
         emails_text += (
@@ -62,10 +74,10 @@ def filter_emails_batch(emails: list[dict]) -> list[tuple[bool, str, str]]:
                 "stream": False,
                 "options": {
                     "temperature": 0.1,
-                    "num_predict": 600,
+                    "num_predict": 400,
                 }
             },
-            timeout=120,
+            timeout=60,
         )
         response.raise_for_status()
         raw = response.json().get("response", "").strip()
@@ -85,7 +97,7 @@ def filter_emails_batch(emails: list[dict]) -> list[tuple[bool, str, str]]:
             
             while len(results) < len(emails):
                 results.append((False, "No response from LLM", "skip"))
-            return results
+            return results[:len(emails)]
 
     except json.JSONDecodeError:
         print(f"[Filter] Could not parse LLM batch response as JSON")
@@ -93,3 +105,4 @@ def filter_emails_batch(emails: list[dict]) -> list[tuple[bool, str, str]]:
         print(f"[Filter] LLM error: {e}")
 
     return [(False, "LLM unavailable", "skip") for _ in emails]
+

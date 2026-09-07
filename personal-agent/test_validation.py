@@ -97,5 +97,31 @@ class TestToolCallValidation(unittest.TestCase):
         self.assertNotIn("Note:", revised_3.args["body"])
         self.assertNotIn(instruction_3, revised_3.args["body"])
 
+    def test_has_placeholder_detection(self):
+        """Verify _has_placeholder correctly detects bracketed template tags in drafts."""
+        from agent.core import _has_placeholder
+        
+        draft_with_placeholder = ToolCall(
+            tool="send_email",
+            args={"to": "test@example.com", "subject": "Test", "body": "Hi, [insert contact info here]."},
+            reasoning="Testing"
+        )
+        self.assertTrue(_has_placeholder(draft_with_placeholder))
+
+        clean_draft = ToolCall(
+            tool="send_email",
+            args={"to": "test@example.com", "subject": "Test", "body": "Hi, please call me tomorrow."},
+            reasoning="Testing"
+        )
+        self.assertFalse(_has_placeholder(clean_draft))
+
+    def test_missing_reasoning_field_defaults(self):
+        """Verify ToolCall validates JSON correctly when reasoning field is omitted by LLM."""
+        json_str = '{"tool": "send_email", "args": {"to": "statsmaster.12.5@gmail.com", "subject": "Resume", "body": "Hi"}}'
+        tc = ToolCall.model_validate_json(json_str)
+        self.assertEqual(tc.tool, "send_email")
+        self.assertEqual(tc.reasoning, "No reasoning provided.")
+
+
 if __name__ == "__main__":
     unittest.main()

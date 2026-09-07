@@ -6,9 +6,13 @@ from langchain.tools import tool
 import config
 
 
-def send_email_raw(to: str, subject: str, body: str) -> bool:
+import os
+from email.mime.base import MIMEBase
+from email import encoders
+
+def send_email_raw(to: str, subject: str, body: str, attachment_path: str = None) -> bool:
     """
-    Send an email via Gmail SMTP.
+    Send an email via Gmail SMTP with optional file attachment.
     Returns True on success, False on failure.
     """
     try:
@@ -17,6 +21,19 @@ def send_email_raw(to: str, subject: str, body: str) -> bool:
         msg["To"] = to
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
+
+        if attachment_path and os.path.exists(attachment_path):
+            filename = os.path.basename(attachment_path)
+            with open(attachment_path, "rb") as attachment:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                f"attachment; filename= {filename}",
+            )
+            msg.attach(part)
+            print(f"[EmailSender] Attached file: {filename}")
 
         with smtplib.SMTP(config.SMTP_SERVER, config.SMTP_PORT) as server:
             server.ehlo()
@@ -29,6 +46,7 @@ def send_email_raw(to: str, subject: str, body: str) -> bool:
     except Exception as e:
         print(f"[EmailSender] Error sending email: {e}")
         return False
+
 
 
 @tool

@@ -24,17 +24,54 @@ def send_telegram_message(text: str, reply_markup: dict = None, chat_id: str = N
         response.raise_for_status()
         return True
     except Exception as e:
-        print(f"[Telegram] Error sending message: {e}")
         # Fallback retry without Markdown formatting in case of Telegram markdown syntax error
-        if "Markdown" in str(e) or (response is not None and "can't parse entities" in response.text):
-            try:
-                payload["parse_mode"] = None
-                r2 = requests.post(url, json=payload, timeout=10)
-                r2.raise_for_status()
-                return True
-            except Exception as ex:
-                print(f"[Telegram] Fallback error sending message: {ex}")
-        return False
+        try:
+            payload.pop("parse_mode", None)
+            r2 = requests.post(url, json=payload, timeout=10)
+            r2.raise_for_status()
+            return True
+        except Exception as ex:
+            print(f"[Telegram] Error sending message: {ex}")
+            return False
+
+
+
+import os
+
+def download_telegram_file(file_id: str, custom_filename: str = None) -> str:
+    """
+    Download a file attachment from Telegram Bot API and save it locally.
+    Returns the absolute path of the saved file or None on failure.
+    """
+    try:
+        get_file_url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/getFile"
+        res = requests.get(get_file_url, params={"file_id": file_id}, timeout=10)
+        res.raise_for_status()
+        file_path_info = res.json().get("result", {}).get("file_path")
+        
+        if not file_path_info:
+            return None
+            
+        download_url = f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}/{file_path_info}"
+        file_res = requests.get(download_url, timeout=30)
+        file_res.raise_for_status()
+        
+        download_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "downloads")
+        os.makedirs(download_dir, exist_ok=True)
+        
+        filename = custom_filename or os.path.basename(file_path_info)
+        saved_path = os.path.join(download_dir, filename)
+        
+        with open(saved_path, "wb") as f:
+            f.write(file_res.content)
+            
+        print(f"[Telegram] Downloaded attachment to: {saved_path}")
+        return saved_path
+    except Exception as e:
+        print(f"[Telegram] Error downloading file {file_id}: {e}")
+        return None
+
+
 
 
 def get_telegram_updates(offset: int = None) -> list[dict]:

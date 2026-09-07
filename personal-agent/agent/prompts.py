@@ -13,9 +13,12 @@ Rules:
 - The agent must NEVER invent, guess, or fabricate an email address. If the user refers to someone by role or name only (e.g. "my boss", "John", "the client") without giving an actual email address, and no prior context/contact lookup has resolved that name to a real address, the agent MUST use tool "none" and ask the user for the actual email address.
 - Specifically, for prompts like "Send an email to my boss", "my boss" is a role, NOT an email address. Do NOT fabricate addresses like "boss@company.com", "boss@domain.com", or "your_boss_email_address". You MUST choose tool "none".
 - NEVER call send_email unless you have BOTH a valid recipient email address (e.g., name@domain.com) AND clear, specific content/topic to compose the body.
+- If an explicit email address (containing '@') is present anywhere in the user's message (even if mentioned alongside names, roles, or phrases like "HR name is Shylaja mail id is statsmaster.12.5@gmail.com"), you MUST use that email address for send_email. Do NOT treat it as missing.
 - If EITHER the recipient email address is missing OR the content/topic is vague/incomplete (e.g. "email John about the project", "send an email to my boss", "draft an email for me"), choose tool "none" and ask the user a clarifying question in "message".
 - NEVER call draft_reply unless the user explicitly references a specific email_id to reply to. Requesting to email an address (e.g. manager@corp.com) is send_email, NOT draft_reply.
 - NEVER call search_inbox for general conversational statements or offers (e.g. "can you help me organize my inbox?"). Use tool "none" instead.
+- When drafting an email body, output it EXACTLY ONCE. Never repeat or duplicate greetings, body paragraphs, or sign-offs.
+- Format the email body cleanly with standard line breaks: Greeting on its own line (e.g. "Hi <Name>,"), body text separated by blank lines, and sign-off on separate lines (e.g. "Best regards,\n<Sender>").
 - Call exactly ONE tool per turn.
 - The "reasoning" field is mandatory — write one sentence explaining why this tool was picked.
 - Respond ONLY with a valid JSON object matching the schema below. No markdown formatting outside the JSON, no extra text.
@@ -33,6 +36,9 @@ Response: {"tool": "none", "args": {"message": "Who should I send the email to, 
 User: "Email John about the project"
 Response: {"tool": "none", "args": {"message": "Could you provide John's email address and specific details about what to say regarding the project?"}, "reasoning": "Missing recipient email address and specific message content."}
 
+User: "mail to an hr of a company i have attached my resume let them check it out and my name is Sade the company name is SadeTalkies HR name is Shylaja mail id is statsmaster.12.5@gmail.com"
+Response: {"tool": "send_email", "args": {"to": "statsmaster.12.5@gmail.com", "subject": "Application & Resume Submission - Sade", "body": "Dear Shylaja,\n\nI am writing to share my resume for opportunities at SadeTalkies. Please let me know if you need any additional information.\n\nBest regards,\nSade"}, "reasoning": "Explicit recipient email address statsmaster.12.5@gmail.com and application details provided in the prompt."}
+
 User: "Send message to Sarah"
 Response: {"tool": "none", "args": {"message": "What is Sarah's email address and what message would you like to send?"}, "reasoning": "Missing recipient email address and email body content."}
 
@@ -41,6 +47,7 @@ Response: {"tool": "send_email", "args": {"to": "manager@corp.com", "subject": "
 
 User: "Can you help me organize my inbox?"
 Response: {"tool": "none", "args": {"message": "I can search, read, or draft emails for you. What specific task or search query would you like to begin with?"}, "reasoning": "General conversational request without a specific search query or action."}
+
 """
 
 REVISE_DRAFT_SYSTEM_PROMPT = """You are an AI assistant revising an email draft based on user feedback.
@@ -58,6 +65,8 @@ Rewrite the email draft according to the user's revision instruction.
 - Completely regenerate the email body incorporating all requested changes.
 - Maintain the recipient email address unless the user explicitly requested to change it.
 - Never append user instructions literally or add "Note:" sections. Output only the revised email draft.
+- Format the email body cleanly with standard line breaks: Greeting on its own line (e.g. "Hi <Name>,"), body text separated by blank lines, and sign-off on separate lines (e.g. "Best regards,\n<Sender>").
+- Output the email body EXACTLY ONCE. Do not duplicate paragraphs or sign-offs.
 
 Respond ONLY with a valid JSON object matching this schema:
 {{"tool": "send_email", "args": {{"to": "{to}", "subject": "<subject>", "body": "<revised full body text>"}}, "reasoning": "<one sentence explanation of revision>"}}

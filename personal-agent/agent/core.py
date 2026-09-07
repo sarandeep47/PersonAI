@@ -1,4 +1,4 @@
-# agent/core.py
+import re
 import json
 import requests
 from typing import List, Dict
@@ -25,6 +25,93 @@ def _ollama_chat(messages: List[Dict[str, str]], system: str) -> str:
     )
     response.raise_for_status()
     return response.json()["message"]["content"]
+
+def _clean_email_body(body: str) -> str:
+    """
+    Sanitize and format email body text:
+    1. Deduplicate repeated paragraphs or blocks (prevents model repetition loops).
+    2. Format greeting and sign-off on their own distinct lines with clean spacing.
+    """
+    if not body:
+        return ""
+    
+    text = body.replace("\r\n", "\n").strip()
+    
+    # 1. Deduplicate identical repeated paragraph blocks split by blank lines
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+    unique_blocks = []
+    for b in blocks:
+        if not unique_blocks or b != unique_blocks[-1]:
+            unique_blocks.append(b)
+    
+    text = "\n\n".join(unique_blocks)
+    
+    # 2. Deduplicate repeated lines
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    unique_lines = []
+    for l in lines:
+        if not unique_lines or l != unique_lines[-1]:
+            unique_lines.append(l)
+            
+    full_text = "\n".join(unique_lines)
+    
+    # 3. Format greeting if on same line or missing comma
+    m_greet = re.match(r"^(Hi|Hello|Dear|Hey)\s+([A-Za-z0-9_\-]+)(?:,?\s+|\n+)(.*)$", full_text, re.DOTALL | re.IGNORECASE)
+    greeting_str = ""
+    rest_str = full_text
+    if m_greet:
+        g_word, g_name, rest_str = m_greet.groups()
+        greeting_str = f"{g_word.capitalize()} {g_name},"
+    
+    # 4. Format closing / sign-off at the end
+    closing_pattern = r"((?:Best regards|Regards|Sincerely|Thanks|Thank you|Warm regards),?)\s*(.*)$"
+    m_close = re.search(closing_pattern, rest_str, re.IGNORECASE | re.DOTALL)
+    
+    closing_str = ""
+    body_text = rest_str
+    if m_close:
+        body_text = rest_str[:m_close.start()].strip()
+        c_val = m_close.group(0).strip()
+        m_sign = re.match(r"^((?:Best regards|Regards|Sincerely|Thanks|Thank you|Warm regards),?)\s*(.*)$", c_val, re.IGNORECASE | re.DOTALL)
+        if m_sign:
+            c_word, c_name = m_sign.groups()
+            c_word = c_word.strip()
+            if not c_word.endswith(","):
+                c_word += ","
+            c_name = c_name.strip()
+            if c_name:
+                closing_str = f"{c_word}\n{c_name}"
+            else:
+                closing_str = c_word
+        else:
+            closing_str = c_val
+
+    parts = []
+    if greeting_str:
+        parts.append(greeting_str)
+    if body_text:
+        parts.append(body_text)
+    if closing_str:
+        parts.append(closing_str)
+        
+    return "\n\n".join(parts)
+
+def _has_placeholder(tool_call: ToolCall) -> bool:
+    """Check if a send_email tool call contains bracketed placeholders in subject or body."""
+    if not tool_call or tool_call.tool != "send_email":
+        return False
+    subject = str(tool_call.args.get("subject", ""))
+    body = str(tool_call.args.get("body", ""))
+    pattern = r"\[.*?\]"
+    return bool(re.search(pattern, subject) or re.search(pattern, body))
+
+def _placeholder_fallback() -> ToolCall:
+    """Fallback response when bracketed placeholders remain in the generated draft."""
+    return ToolCall(
+        tool="none",
+        args={"message": "I generated an incomplete draft with a placeholder — let me try again"},
+        reasoning="Generated email subject or body contained an unfilled bracketed placeholder."
+    )
 
 def validate_tool_call(tool_call: ToolCall, user_message: str) -> ToolCall:
     """
@@ -71,10 +158,11 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None) -> ToolC
     messages = history + [{"role": "user", "content": user_message}]
     raw_response = _ollama_chat(messages, AGENT_SYSTEM_PROMPT)
 
+    res = None
     try:
         res = ToolCall.model_validate_json(raw_response)
         res._was_retried = False
-        return validate_tool_call(res, user_message)
+        res = validate_tool_call(res, user_message)
     except (ValidationError, json.JSONDecodeError) as e:
         # Single correction retry loop
         correction_msg = (
@@ -84,10 +172,57 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None) -> ToolC
         )
         messages.append({"role": "assistant", "content": raw_response})
         messages.append({"role": "user", "content": correction_msg})
-        raw_retry = _ollama_chat(messages, AGENT_SYSTEM_PROMPT)
-        res = ToolCall.model_validate_json(raw_retry)
-        res._was_retried = True
-        return validate_tool_call(res, user_message)
+        try:
+            raw_retry = _ollama_chat(messages, AGENT_SYSTEM_PROMPT)
+            res = ToolCall.model_validate_json(raw_retry)
+            res._was_retried = True
+            res = validate_tool_call(res, user_message)
+        except Exception:
+            try:
+                data = json.loads(raw_response)
+                if "tool" in data and "args" in data:
+                    res = ToolCall(
+                        tool=data["tool"],
+                        args=data["args"],
+                        reasoning=data.get("reasoning", "No reasoning provided.")
+                    )
+                    res = validate_tool_call(res, user_message)
+                else:
+                    raise ValueError("Invalid format")
+            except Exception:
+                res = ToolCall(
+                    tool="none",
+                    args={"message": "I had trouble structuring that request. Could you rephrase it?"},
+                    reasoning=f"Failed to parse LLM response: {e}"
+                )
+
+    # Safeguard check: detect bracketed template placeholders (e.g. [insert contact info])
+    if res and res.tool == "send_email" and _has_placeholder(res):
+        placeholder_retry_msg = (
+            "Your previous email draft contained unfilled template placeholders in brackets (e.g. '[...]'). "
+            "You must write a complete, final email without any bracketed placeholders or template tags. "
+            "Regenerate the email draft now, omitting all brackets or placeholders."
+        )
+        retry_messages = list(messages) + [
+            {"role": "assistant", "content": raw_response},
+            {"role": "user", "content": placeholder_retry_msg}
+        ]
+        try:
+            raw_retry = _ollama_chat(retry_messages, AGENT_SYSTEM_PROMPT)
+            cleaned_retry = _clean_json_str(raw_retry)
+            res_retry = ToolCall.model_validate_json(cleaned_retry)
+            res_retry._was_retried = True
+            res_retry = validate_tool_call(res_retry, user_message)
+            if res_retry.tool == "send_email" and _has_placeholder(res_retry):
+                return _placeholder_fallback()
+            res = res_retry
+        except Exception:
+            return _placeholder_fallback()
+
+    if res and res.tool == "send_email" and "body" in res.args:
+        res.args["body"] = _clean_email_body(res.args["body"])
+
+    return res
 
 def _clean_json_str(text: str) -> str:
     """Helper to strip markdown code blocks from model JSON output."""
@@ -154,6 +289,30 @@ def revise_draft(original_draft: dict, user_feedback: str) -> ToolCall:
                 },
                 reasoning="I couldn't confidently make that change — could you rephrase what you'd like edited?"
             )
+
+    # Safeguard check: detect bracketed template placeholders (e.g. [insert contact info])
+    if res and res.tool == "send_email" and _has_placeholder(res):
+        placeholder_retry_msg = (
+            "Your revised email draft contained unfilled template placeholders in brackets (e.g. '[...]'). "
+            "You must write a complete, final email without any bracketed placeholders. "
+            "Regenerate the email draft now, omitting all brackets or placeholders."
+        )
+        retry_messages = list(messages) + [
+            {"role": "assistant", "content": raw_response},
+            {"role": "user", "content": placeholder_retry_msg}
+        ]
+        try:
+            raw_retry = _ollama_chat(retry_messages, system_prompt)
+            cleaned_retry = _clean_json_str(raw_retry)
+            res_retry = ToolCall.model_validate_json(cleaned_retry)
+            if res_retry.tool == "send_email" and _has_placeholder(res_retry):
+                return _placeholder_fallback()
+            res = res_retry
+        except Exception:
+            return _placeholder_fallback()
+
+    if res and res.tool == "send_email" and "body" in res.args:
+        res.args["body"] = _clean_email_body(res.args["body"])
 
     if res and res.tool == "send_email":
         orig_body = original_draft.get("body", "")

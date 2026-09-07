@@ -26,4 +26,5 @@ ToolName = Literal["send_email", "search_inbox", "read_email", "draft_reply", "n
 class ToolCall(BaseModel):
     tool: ToolName
     args: Dict[str, Any] = Field(default_factory=dict)
-    reasoning: str = Field(..., description="One sentence explaining why this tool was chosen")
+    reasoning: str = Field(default="No reasoning provided.", description="One sentence explaining why this tool was chosen")
+
