@@ -115,9 +115,42 @@ def handle_message(chat_id: str, text: str, attachment_path: str = None):
                 send_telegram_message(msg, chat_id=chat_id)
                 db.add_message(chat_id, "assistant", msg)
 
-        elif tool_call.tool == "delete_contact":
+        elif tool_call.tool == "rename_contact":
             query = str(tool_call.args.get("query", "")).strip()
-            matches = db.find_contacts_matching_query(chat_id, query)
+            new_name = str(tool_call.args.get("new_name", "")).strip()
+            if not query or not new_name:
+                msg = "⚠️ Please specify which contact to rename and the new name."
+                send_telegram_message(msg, chat_id=chat_id)
+                db.add_message(chat_id, "assistant", msg)
+            else:
+                # Find the contact first so we can confirm what we're renaming
+                matches = db.find_contacts_matching_query(chat_id, query)
+                if not matches:
+                    msg = f"⚠️ No saved contact found matching `{query}`."
+                    send_telegram_message(msg, chat_id=chat_id)
+                    db.add_message(chat_id, "assistant", msg)
+                elif len(matches) > 1:
+                    summary = f"⚠️ Multiple contacts match `{query}`:\n\n"
+                    for m in matches:
+                        summary += f"• *{m['name']}*: `{m['email']}`\n"
+                    summary += "\nPlease specify the exact name or email to identify which contact to rename."
+                    send_telegram_message(summary, chat_id=chat_id)
+                    db.add_message(chat_id, "assistant", summary)
+                else:
+                    matched = matches[0]
+                    old_name = matched["name"]
+                    success = db.rename_contact(chat_id, old_name, new_name)
+                    if success:
+                        msg = f"✅ Contact renamed: *{old_name}* → *{new_name}* (`{matched['email']}`)"
+                        send_telegram_message(msg, chat_id=chat_id)
+                        db.add_message(chat_id, "assistant", f"Renamed contact '{old_name}' to '{new_name}' ({matched['email']}).")
+                    else:
+                        msg = f"⚠️ Could not rename contact `{query}` — not found."
+                        send_telegram_message(msg, chat_id=chat_id)
+                        db.add_message(chat_id, "assistant", msg)
+
+        elif tool_call.tool == "delete_contact":
+            query = str(tool_call.args.get("query", "")).strip()            matches = db.find_contacts_matching_query(chat_id, query)
 
             if len(matches) > 1:
                 # Ambiguous match: BLOCK auto-deletion and list candidate contacts for user clarification
@@ -307,6 +340,9 @@ def handle_callback_query(cq: dict):
         payload = action["payload"]
         answer_callback_query(cq_id, "Deleting contact...")
         db.delete_contact(chat_id, payload["name"])
+        # Scrub the deleted contact's email from conversation_history and any
+        # queued pending_action payloads so it cannot resurface as LLM context.
+        db.scrub_contact_from_history(chat_id, payload["email"])
         send_telegram_message(f"✅ Successfully removed *{payload['name']}* (`{payload['email']}`) from your contacts!", chat_id=chat_id)
         db.delete_pending_action(action_id)
 

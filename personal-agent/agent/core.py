@@ -125,27 +125,44 @@ def _placeholder_fallback() -> ToolCall:
 
 def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dict[str, str]] = None, chat_id: str = None) -> ToolCall:
     """
-    Code-level validation to prevent model hallucinations:
-    - send_email: 'to' recipient email address must appear literally in user_message, recent history, or saved contacts.
-    - draft_reply: 'email_id' must appear literally in user_message or recent history.
-    """
-    context_text = user_message.lower()
-    if history:
-        for item in history:
-            context_text += " " + str(item.get("content", "")).lower()
+    Code-level validation to prevent model hallucinations.
 
+    For send_email, the recipient address must be grounded in a TRUSTED source:
+      - Tier 1 (trusted):   the current user_message literal text
+      - Tier 1 (trusted):   the live contacts table for chat_id
+      Conversation history is explicitly UNTRUSTED for recipient resolution —
+      it may contain emails of contacts that have since been deleted.
+
+    For draft_reply, email_id must appear literally in user_message or history.
+    """
+    # --- Tier 1: trusted sources only (current message + live contacts) ---
+    trusted_text = user_message.lower()
     if chat_id:
         saved_contacts = db.get_contacts(chat_id)
         for c in saved_contacts:
-            context_text += " " + c["email"].lower()
+            trusted_text += " " + c["email"].lower()
+
+    # --- Tier 2: untrusted history (used ONLY for draft_reply id lookup) ---
+    history_text = ""
+    if history:
+        for item in history:
+            history_text += " " + str(item.get("content", "")).lower()
 
     if tool_call.tool == "send_email":
         to_address = str(tool_call.args.get("to", "")).strip().lower()
-        if not to_address or to_address not in context_text:
+        # SECURITY: only accept the address if it appears in the current message
+        # or is a live saved contact.  History text is deliberately excluded here
+        # to prevent deleted-contact emails from resurfacing via old turns.
+        if not to_address or to_address not in trusted_text:
+            print(
+                f"[Validation] Blocked send_email to '{to_address}' — "
+                "address not found in current user message or live contacts table "
+                "(history excluded to prevent deleted-contact leak)."
+            )
             overridden = ToolCall(
                 tool="none",
                 args={"message": "Could you please provide the recipient's actual email address?"},
-                reasoning="Recipient email address was not explicitly provided in the user's input message, history, or saved contacts (prevented hallucination)."
+                reasoning="Recipient email address was not explicitly provided in the current message or saved contacts (prevented hallucination / deleted-contact leak)."
             )
             if hasattr(tool_call, "_was_retried"):
                 overridden._was_retried = tool_call._was_retried
@@ -153,7 +170,8 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
 
     elif tool_call.tool == "draft_reply":
         email_id = str(tool_call.args.get("email_id", "")).strip().lower()
-        if not email_id or email_id not in context_text:
+        combined = trusted_text + history_text
+        if not email_id or email_id not in combined:
             overridden = ToolCall(
                 tool="none",
                 args={"message": "Could you please specify which email ID you want to reply to?"},
@@ -166,14 +184,24 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
     return tool_call
 
 def _resolve_tool_call_contact(tool_call: ToolCall, user_message: str, chat_id: Optional[str] = None) -> ToolCall:
-    """Check and resolve recipient name against saved contacts table."""
+    """
+    Resolve a recipient name/role to an email via the live contacts table.
+
+    Only runs when the model produced a non-email value in `to` (i.e. a name
+    or role string).  When `to` already contains '@' it is a raw email address
+    provided explicitly by the user — we leave it alone and let validate_tool_call
+    decide whether it is trusted.
+    """
     if not tool_call or tool_call.tool != "send_email" or not chat_id:
         return tool_call
 
     to_val = str(tool_call.args.get("to", "")).strip()
 
-    # If recipient isn't a valid email address or user referenced a name
-    if "@" not in to_val or to_val:
+    # Only attempt contact resolution when `to` is NOT already an email address.
+    # Previously the condition was `"@" not in to_val or to_val` which is always
+    # True for any non-empty string — causing live-contact lookup to run even when
+    # the model had already placed a valid (but deleted) email in `to`.
+    if "@" not in to_val:
         matched = db.find_contact_by_name(chat_id, to_val) or db.find_contact_by_name(chat_id, user_message)
         if matched:
             tool_call.args["to"] = matched["email"]
@@ -200,12 +228,55 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
         m_email = re.search(r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", user_message)
         if m_email:
             email_str = m_email.group(1)
-            m_name = re.search(r"(?:email|mail|send to|to)\s+([A-Za-z0-9_.\-\s]+?)\s+<?" + re.escape(email_str) + r">?", user_message, re.IGNORECASE)
-            if m_name:
-                c_name = m_name.group(1).strip()
+            c_name = None
+
+            # Pattern priority order — most specific first
+
+            # 1. "HR name is Shylaja mail id is email@x.com"  /  "name is X ... email"
+            m = re.search(
+                r"\bname\s+is\s+([A-Za-z][A-Za-z0-9_.\-\s]{1,38}?)\s+(?:and\s+)?(?:her|his|their)?\s*(?:mail|email|mail\s+id|email\s+id)\s+is\s+" + re.escape(email_str),
+                user_message, re.IGNORECASE
+            )
+            if m:
+                c_name = m.group(1).strip()
+
+            # 2. "X mail id is email" / "X email id is email"
+            if not c_name:
+                m = re.search(
+                    r"([A-Za-z][A-Za-z0-9_.\-\s]{1,38}?)\s+(?:mail|email)\s+(?:id\s+)?is\s+" + re.escape(email_str),
+                    user_message, re.IGNORECASE
+                )
+                if m:
+                    c_name = m.group(1).strip()
+
+            # 3. "HR name is Shylaja" anywhere in message (no email proximity required)
+            if not c_name:
+                m = re.search(
+                    r"\bhr\s+name\s+is\s+([A-Za-z][A-Za-z0-9_.\-\s]{1,38?}?)(?:\s+(?:and|mail|email|her|his)|$)",
+                    user_message, re.IGNORECASE
+                )
+                if m:
+                    c_name = m.group(1).strip()
+
+            # 4. Classic "email/mail/send to NAME <email>" pattern
+            if not c_name:
+                m = re.search(
+                    r"(?:email|mail|send to|to)\s+([A-Za-z0-9_.\-\s]+?)\s+<?" + re.escape(email_str) + r">?",
+                    user_message, re.IGNORECASE
+                )
+                if m:
+                    c_name = m.group(1).strip()
+
+            if c_name:
+                # Strip leading verb phrases
                 c_name = re.sub(r"^(?:send|email|mail|draft|write)\s+(?:to\s+)?(?:a\s+mail\s+to\s+)?", "", c_name, flags=re.IGNORECASE).strip()
-                c_name = re.sub(r"\s+(?:a\s+mail|his\s+mail|her\s+mail|their\s+mail|mail\s+id|email\s+id|is|id|that)$", "", c_name, flags=re.IGNORECASE).strip()
-                if c_name and len(c_name) < 40 and c_name.lower() not in ["an email", "a mail", "email", "the"]:
+                # Strip a bare leading "to" left over from "mail to NAME <email>"
+                c_name = re.sub(r"^to\s+", "", c_name, flags=re.IGNORECASE).strip()
+                # Strip common trailing noise words that indicate the name hasn't been fully captured
+                c_name = re.sub(r"\s+(?:a\s+mail|his\s+mail|her\s+mail|their\s+mail|mail\s+id|email\s+id|is|id|that|and)$", "", c_name, flags=re.IGNORECASE).strip()
+                # Reject single-word noise tokens that aren't real names
+                _noise = {"is", "and", "the", "an", "a", "to", "email", "mail", "her", "his", "their", "id", "that"}
+                if c_name and len(c_name) < 40 and c_name.lower() not in {"an email", "a mail", "email", "the"} and c_name.lower() not in _noise:
                     db.upsert_contact(chat_id, c_name, email_str)
 
     system_prompt = AGENT_SYSTEM_PROMPT
@@ -332,7 +403,37 @@ def _post_process_contact_intent(tool_call: ToolCall, user_message: str) -> Tool
                 args={"query": query_str},
                 reasoning=f"User requested removal of contact data for '{query_str}'."
             )
-            
+
+    # 3. Rename contact intent safeguard
+    rename_triggers = [
+        # "rename hr to Shalini" / "rename hr contact to Shalini"
+        (r"(?:rename)\s+(?:the\s+)?(.+?)\s+(?:contact\s+)?to\s+(.+)", 1, 2),
+        # "change hr name to Shalini" / "change the name of hr to Shalini"
+        (r"change\s+(?:the\s+)?(?:name\s+of\s+)?(.+?)\s+name\s+to\s+(.+)", 1, 2),
+        (r"change\s+(?:the\s+)?(.+?)\s+(?:contact\s+)?to\s+(.+)", 1, 2),
+        # "update hr name to Shalini"
+        (r"update\s+(?:the\s+)?(?:name\s+of\s+)?(.+?)\s+(?:name\s+)?to\s+(.+)", 1, 2),
+        # "hr is now called Shalini" / "hr is now Shalini" / "hr is renamed to Shalini"
+        (r"(.+?)\s+(?:is\s+now\s+called|is\s+now|is\s+renamed\s+to|new\s+name\s+is)\s+(.+)", 1, 2),
+        # "new hr name is Shalini"
+        (r"new\s+(.+?)\s+name\s+is\s+(.+)", 1, 2),
+    ]
+    if tool_call.tool in ["search_inbox", "none", "send_email"]:
+        for pattern, q_group, n_group in rename_triggers:
+            m_ren = re.search(pattern, msg_lower)
+            if m_ren:
+                query_str = m_ren.group(q_group).strip()
+                new_name_str = m_ren.group(n_group).strip()
+                # Strip noise trailing words
+                query_str = re.sub(r"\s+\b(?:contact|contacts|name)\b$", "", query_str, flags=re.IGNORECASE).strip()
+                new_name_str = re.sub(r"\s+\b(?:contact|contacts)\b$", "", new_name_str, flags=re.IGNORECASE).strip()
+                if query_str and new_name_str:
+                    return ToolCall(
+                        tool="rename_contact",
+                        args={"query": query_str, "new_name": new_name_str},
+                        reasoning=f"User requested renaming contact '{query_str}' to '{new_name_str}'."
+                    )
+
     return tool_call
 
 def _clean_json_str(text: str) -> str:

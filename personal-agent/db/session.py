@@ -162,6 +162,69 @@ def get_history(chat_id: str, limit: int = 10) -> list[dict]:
     history = [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
     return history
 
+def scrub_contact_from_history(chat_id: str, email: str) -> int:
+    """
+    Redact a deleted contact's email address from every conversation_history row
+    for chat_id.  The email is replaced with the placeholder '[redacted]' so the
+    row structure (and message count) is preserved, but the address can no longer
+    resurface as context for future LLM calls.
+
+    Also scrubs the address from any unexpired pending_actions payloads (e.g. a
+    draft that was queued before the contact was removed).
+
+    Returns the number of history rows that were modified.
+    """
+    if not email or "@" not in email:
+        return 0
+
+    email_lower = email.strip().lower()
+    # Build a case-insensitive pattern that matches the exact email address
+    # (word-boundary anchored so "foo@bar.com" doesn't match "xfoo@bar.com")
+    pattern = re.compile(re.escape(email_lower), re.IGNORECASE)
+    redaction = "[redacted]"
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # --- 1. Scrub conversation_history rows ---
+    cursor.execute(
+        "SELECT id, content FROM conversation_history WHERE chat_id = ? AND LOWER(content) LIKE ?",
+        (str(chat_id), f"%{email_lower}%")
+    )
+    rows = cursor.fetchall()
+    modified = 0
+    with conn:
+        for row in rows:
+            new_content = pattern.sub(redaction, row["content"])
+            if new_content != row["content"]:
+                conn.execute(
+                    "UPDATE conversation_history SET content = ? WHERE id = ?",
+                    (new_content, row["id"])
+                )
+                modified += 1
+
+    # --- 2. Scrub pending_actions payloads that contain the address ---
+    cursor.execute(
+        "SELECT id, payload FROM pending_actions WHERE chat_id = ? AND LOWER(payload) LIKE ?",
+        (str(chat_id), f"%{email_lower}%")
+    )
+    pending_rows = cursor.fetchall()
+    with conn:
+        for row in pending_rows:
+            new_payload = pattern.sub(redaction, row["payload"])
+            if new_payload != row["payload"]:
+                conn.execute(
+                    "UPDATE pending_actions SET payload = ? WHERE id = ?",
+                    (new_payload, row["id"])
+                )
+
+    print(
+        f"[DB] scrub_contact_from_history: redacted '{email}' from "
+        f"{modified} history row(s) and {len(pending_rows)} pending action(s) "
+        f"for chat_id={chat_id}."
+    )
+    return modified
+
 # --- Contacts & User Profile ---
 
 def normalize_contact_name(name: str) -> str:
@@ -242,6 +305,35 @@ def delete_contact(chat_id: str, identifier: str) -> bool:
             (str(chat_id), norm_id, identifier.strip().lower(), identifier.strip().lower())
         )
         return cursor.rowcount > 0
+
+def rename_contact(chat_id: str, identifier: str, new_name: str) -> bool:
+    """
+    Rename an existing contact identified by name, nickname, role, or email.
+    Updates both the display name and normalized_name in place.
+    Returns True if a row was updated, False if no matching contact was found.
+    """
+    new_name = new_name.strip()
+    if not new_name:
+        return False
+    new_norm = normalize_contact_name(new_name)
+    norm_id = normalize_contact_name(identifier)
+    now = time.time()
+    conn = get_db()
+    with conn:
+        cursor = conn.cursor()
+        # Find the contact first (same matching logic as delete_contact)
+        cursor.execute(
+            "SELECT id FROM contacts WHERE chat_id = ? AND (normalized_name = ? OR LOWER(email) = LOWER(?) OR LOWER(name) = LOWER(?))",
+            (str(chat_id), norm_id, identifier.strip().lower(), identifier.strip().lower())
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE contacts SET name = ?, normalized_name = ?, last_used_at = ? WHERE id = ?",
+            (new_name, new_norm, now, row["id"])
+        )
+        return True
 
 def find_contact_by_name(chat_id: str, query_name: str) -> Optional[Dict[str, Any]]:
     """

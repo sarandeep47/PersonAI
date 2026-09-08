@@ -24,10 +24,14 @@ class ExportContactsArgs(BaseModel):
 class DeleteContactArgs(BaseModel):
     query: str = Field(..., description="Name, nickname, or role of the contact to delete (e.g. 'hr', 'John')")
 
+class RenameContactArgs(BaseModel):
+    query: str = Field(..., description="Current name, nickname, or role identifying the contact to rename (e.g. 'hr', 'Shylaja')")
+    new_name: str = Field(..., description="The new display name to assign to the contact")
+
 class NoneArgs(BaseModel):
     message: str = Field(..., description="Response/question to show to the user")
 
-ToolName = Literal["send_email", "search_inbox", "read_email", "draft_reply", "export_contacts", "delete_contact", "none"]
+ToolName = Literal["send_email", "search_inbox", "read_email", "draft_reply", "export_contacts", "delete_contact", "rename_contact", "none"]
 
 class ToolCall(BaseModel):
     tool: ToolName
