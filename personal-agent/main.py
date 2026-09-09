@@ -7,6 +7,7 @@ from tools.email_reader import fetch_unread_emails
 from tools.telegram import send_telegram_message, get_telegram_updates, answer_callback_query, download_telegram_file, send_telegram_document
 from tools.email_sender import send_email_raw
 from agent.core import call_agent, revise_draft
+from agent.schemas import TaskPlan
 import db.session as db
 import config
 
@@ -98,6 +99,10 @@ def handle_message(chat_id: str, text: str, attachment_path: str = None):
     
     try:
         tool_call = call_agent(text, history=history, chat_id=chat_id)
+        if isinstance(tool_call, TaskPlan):
+            print(f"[Agent] TaskPlan: {len(tool_call.tasks)} tasks | Reasoning: {tool_call.reasoning}")
+            _present_task_plan_confirmation(chat_id, tool_call)
+            return
         print(f"[Agent] Tool: {tool_call.tool} | Reasoning: {tool_call.reasoning}")
 
         if tool_call.tool == "send_email":
@@ -150,7 +155,9 @@ def handle_message(chat_id: str, text: str, attachment_path: str = None):
                         db.add_message(chat_id, "assistant", msg)
 
         elif tool_call.tool == "delete_contact":
-            query = str(tool_call.args.get("query", "")).strip()            matches = db.find_contacts_matching_query(chat_id, query)
+            query = str(tool_call.args.get("query", "")).strip()
+            matches = db.find_contacts_matching_query(chat_id, query)
+
 
             if len(matches) > 1:
                 # Ambiguous match: BLOCK auto-deletion and list candidate contacts for user clarification
@@ -274,6 +281,142 @@ def _present_email_confirmation(chat_id: str, args: dict, attachment_path: str =
     db.add_message(chat_id, "assistant", assistant_summary)
 
 
+# ──────────────────────────────────────────────
+# TASK PLAN CONFIRMATION UI  (Phase 2.5)
+# ──────────────────────────────────────────────
+
+# Maps internal tool names to user-friendly display names.
+_TOOL_DISPLAY_NAMES = {
+    "send_email":      "Send email",
+    "search_inbox":    "Search emails",
+    "read_email":      "Read email",
+    "draft_reply":     "Draft reply",
+    "export_contacts": "Export contacts",
+    "delete_contact":  "Delete contact",
+    "rename_contact":  "Rename contact",
+    "none":            "No action",
+}
+
+
+def _format_tool_name(tool: str) -> str:
+    """Return a human-readable display name for an internal tool identifier."""
+    return _TOOL_DISPLAY_NAMES.get(tool, tool.replace("_", " ").capitalize())
+
+
+def _format_task_plan_confirmation(plan: TaskPlan) -> str:
+    """
+    Build a readable Telegram Markdown confirmation message for a validated TaskPlan.
+
+    Format:
+        📋 *Planned Actions*
+
+        1. Send email
+           To: boss@example.com
+           Subject: Invoice
+
+        2. Search emails
+           Query: invoice
+
+        Reasoning:
+        Find the invoice, then forward it.
+
+        2 actions ready.
+    """
+    lines = ["\ud83d\udccb *Planned Actions*\n"]
+
+    # Argument keys that are worth showing and their friendly labels
+    _ARG_LABELS = {
+        "to":           "To",
+        "subject":      "Subject",
+        "query":        "Query",
+        "email_id":     "Email ID",
+        "instructions": "Instructions",
+        "new_name":     "New name",
+    }
+    # Max characters to show for long string values (body is intentionally omitted)
+    _SHOW_MAX = 120
+    _SKIP_ARGS = {"body", "max_results"}  # body shown separately; max_results is noise
+
+    for i, task in enumerate(plan.tasks, start=1):
+        display_name = _format_tool_name(task.tool)
+        lines.append(f"*{i}.* {display_name}")
+
+        # Show the body preview for send_email (truncated if long)
+        if task.tool == "send_email":
+            for key, label in _ARG_LABELS.items():
+                if key in ("to", "subject") and key in task.args:
+                    val = str(task.args[key])
+                    lines.append(f"   {label}: `{val}`")
+            body = str(task.args.get("body", "")).strip()
+            if body:
+                preview = body[:200].replace("\n", " ")
+                if len(body) > 200:
+                    preview += "..."
+                lines.append(f"   Body: {preview}")
+        else:
+            for key, label in _ARG_LABELS.items():
+                if key in task.args and key not in _SKIP_ARGS:
+                    val = str(task.args[key])
+                    if len(val) > _SHOW_MAX:
+                        val = val[:_SHOW_MAX] + "..."
+                    lines.append(f"   {label}: `{val}`")
+
+        lines.append("")  # blank line between tasks
+
+    # Reasoning
+    if plan.reasoning:
+        lines.append("_Reasoning:_")
+        lines.append(f"_{plan.reasoning}_")
+        lines.append("")
+
+    n = len(plan.tasks)
+    lines.append(f"{n} action{'s' if n != 1 else ''} ready.")
+    lines.append("")
+    lines.append("Proceed?")
+
+    return "\n".join(lines)
+
+
+def _present_task_plan_confirmation(chat_id: str, plan: TaskPlan) -> None:
+    """
+    Send the TaskPlan confirmation message to Telegram with Execute All / Cancel buttons.
+
+    Persists the plan as a pending action (action_type='confirm_taskplan') so
+    Phase 2.6 can retrieve and execute it via callback.
+
+    Phase 2.5: buttons are shown and the pending action is saved.
+              Actual execution is deferred to Phase 2.6.
+    """
+    action_id = f"plan_{uuid.uuid4().hex[:8]}"
+
+    # Serialize the plan tasks as a list of dicts for the pending_action payload
+    tasks_payload = [
+        {"tool": t.tool, "args": t.args, "reasoning": t.reasoning}
+        for t in plan.tasks
+    ]
+    db.save_pending_action(
+        action_id,
+        chat_id,
+        "confirm_taskplan",
+        {"tasks": tasks_payload, "reasoning": plan.reasoning}
+    )
+
+    msg = _format_task_plan_confirmation(plan)
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "⚡ Execute All", "callback_data": f"plan_execute:{action_id}"},
+                {"text": "❌ Cancel", "callback_data": f"plan_cancel:{action_id}"}
+            ]
+        ]
+    }
+    send_telegram_message(msg, reply_markup=reply_markup, chat_id=chat_id)
+
+    n = len(plan.tasks)
+    summary = f"Presented task plan confirmation ({n} task{'s' if n != 1 else ''})."
+    db.add_message(chat_id, "assistant", summary)
+
+
 def handle_callback_query(cq: dict):
     """Handle callback button clicks from inline keyboards."""
     cq_id = cq["id"]
@@ -348,8 +491,25 @@ def handle_callback_query(cq: dict):
 
     elif cmd == "cancel_del":
         answer_callback_query(cq_id, "Cancelled.")
-        send_telegram_message("❌ Contact removal cancelled.", chat_id=chat_id)
+        send_telegram_message("\u274c Contact removal cancelled.", chat_id=chat_id)
         db.delete_pending_action(action_id)
+
+    # ── Phase 2.5: TaskPlan confirmation callbacks ──────────────────────
+    elif cmd == "plan_execute":
+        # Phase 2.5 stub: acknowledge the tap but defer actual execution to Phase 2.6.
+        # The pending action is intentionally NOT deleted so Phase 2.6 can pick it up.
+        answer_callback_query(cq_id, "\u23f3 Preparing to execute tasks...")
+        send_telegram_message(
+            "\u23f3 Task execution is being prepared. \n"
+            "(Phase 2.6 will implement full multi-task execution.)",
+            chat_id=chat_id
+        )
+
+    elif cmd == "plan_cancel":
+        answer_callback_query(cq_id, "Plan cancelled.")
+        db.delete_pending_action(action_id)
+        send_telegram_message("\u274c Task plan cancelled.", chat_id=chat_id)
+
 
 
 def listen_for_telegram_messages():

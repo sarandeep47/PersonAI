@@ -1,11 +1,11 @@
 import re
 import json
 import requests
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from pydantic import ValidationError
 from tenacity import retry, wait_exponential, stop_after_attempt
 import config
-from agent.schemas import ToolCall
+from agent.schemas import ToolCall, TaskPlan
 from agent.prompts import AGENT_SYSTEM_PROMPT, REVISE_DRAFT_SYSTEM_PROMPT
 import db.session as db
 
@@ -209,10 +209,11 @@ def _resolve_tool_call_contact(tool_call: ToolCall, user_message: str, chat_id: 
 
     return tool_call
 
-def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id: Optional[str] = None) -> ToolCall:
+def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id: Optional[str] = None) -> Union[ToolCall, TaskPlan]:
     """
     Main entry point for agent tool choice.
-    Returns validated ToolCall instance.
+    Returns a validated ToolCall for single-tool requests, or a TaskPlan for
+    multi-task requests. Callers should use isinstance() to distinguish.
     """
     if history is None:
         history = []
@@ -297,6 +298,16 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
 
     res = None
     try:
+        # --- Phase 2.3: attempt TaskPlan first, then fall back to ToolCall ---
+        # A TaskPlan contains a "tasks" key; a ToolCall contains "tool".
+        # Pydantic naturally distinguishes them via their required fields.
+        try:
+            res = TaskPlan.model_validate_json(raw_response)
+            # Phase 2.4: validate every task through the existing pipeline.
+            return _validate_task_plan(res, user_message, history, chat_id, sender_name)
+        except (ValidationError, json.JSONDecodeError):
+            pass  # Not a TaskPlan; fall through to ToolCall parsing below
+
         res = ToolCall.model_validate_json(raw_response)
         res._was_retried = False
         res = _resolve_tool_call_contact(res, user_message, chat_id=chat_id)
@@ -312,6 +323,12 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
         messages.append({"role": "user", "content": correction_msg})
         try:
             raw_retry = _ollama_chat(messages, system_prompt)
+            # Apply the same TaskPlan-first logic on the retry response
+            try:
+                res = TaskPlan.model_validate_json(raw_retry)
+                return _validate_task_plan(res, user_message, history, chat_id, sender_name)
+            except (ValidationError, json.JSONDecodeError):
+                pass
             res = ToolCall.model_validate_json(raw_retry)
             res._was_retried = True
             res = _resolve_tool_call_contact(res, user_message, chat_id=chat_id)
@@ -319,7 +336,10 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
         except Exception:
             try:
                 data = json.loads(raw_response)
-                if "tool" in data and "args" in data:
+                if "tasks" in data and isinstance(data["tasks"], list):
+                    res = TaskPlan.model_validate(data)
+                    return _validate_task_plan(res, user_message, history, chat_id, sender_name)
+                elif "tool" in data and "args" in data:
                     res = ToolCall(
                         tool=data["tool"],
                         args=data["args"],
@@ -336,8 +356,11 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
                     reasoning=f"Failed to parse LLM response: {e}"
                 )
 
+    # The remainder of the pipeline applies only to ToolCall results.
+    # TaskPlan results have already been returned above.
+
     # Safeguard check: detect bracketed template placeholders (e.g. [insert contact info])
-    if res and res.tool == "send_email" and _has_placeholder(res):
+    if res and isinstance(res, ToolCall) and res.tool == "send_email" and _has_placeholder(res):
         placeholder_retry_msg = (
             "Your previous email draft contained unfilled template placeholders in brackets (e.g. '[...]'). "
             "You must write a complete, final email without any bracketed placeholders or template tags. "
@@ -360,10 +383,11 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
         except Exception:
             return _placeholder_fallback()
 
-    if res and res.tool == "send_email" and "body" in res.args:
+    if res and isinstance(res, ToolCall) and res.tool == "send_email" and "body" in res.args:
         res.args["body"] = _clean_email_body(res.args["body"], sender_name=sender_name)
 
-    res = _post_process_contact_intent(res, user_message)
+    if isinstance(res, ToolCall):
+        res = _post_process_contact_intent(res, user_message)
 
     return res
 
@@ -435,6 +459,95 @@ def _post_process_contact_intent(tool_call: ToolCall, user_message: str) -> Tool
                     )
 
     return tool_call
+
+
+def _validate_task_plan(
+    plan: TaskPlan,
+    user_message: str,
+    history: List[Dict[str, str]],
+    chat_id: Optional[str],
+    sender_name: Optional[str],
+) -> Union[TaskPlan, ToolCall]:
+    """
+    Phase 2.4 — Apply the existing single-ToolCall validation pipeline
+    independently to every task inside a TaskPlan.
+
+    Pipeline applied to each task (mirrors call_agent single-ToolCall path):
+      1. _resolve_tool_call_contact  — resolve name→email via contacts DB
+      2. validate_tool_call          — security: blocks hallucinated emails / email_id
+      3. _has_placeholder            — detects unfilled [bracket] placeholders
+      4. _clean_email_body           — deduplicates and formats email body
+
+    _post_process_contact_intent is intentionally NOT applied per-task because
+    it re-routes based on the full user_message text (e.g. if the message contains
+    the word "database" it would override a valid search_inbox task to
+    export_contacts). The model's intent as parsed is trusted for multi-task plans.
+
+    Whole-plan rejection:
+        If ANY task fails validation (i.e. validate_tool_call or the placeholder
+        check overrides it to tool="none"), the entire plan is rejected. The
+        caller receives a single none-ToolCall with an explanatory message.
+        Tasks are never silently dropped or partially approved.
+    """
+    validated_tasks: List[ToolCall] = []
+
+    for i, task in enumerate(plan.tasks):
+        # Step 1 — contact resolution (name→email)
+        task = _resolve_tool_call_contact(task, user_message, chat_id=chat_id)
+
+        # Step 2 — security validation
+        task = validate_tool_call(task, user_message, history=history, chat_id=chat_id)
+
+        # Step 3 — placeholder check (no Ollama retry for sub-tasks;
+        #          treat a placeholder as a validation failure)
+        if task.tool == "send_email" and _has_placeholder(task):
+            print(
+                f"[TaskPlan Validation] Task {i + 1} contains unfilled placeholders — "
+                "rejecting entire plan."
+            )
+            return ToolCall(
+                tool="none",
+                args={
+                    "message": (
+                        f"Task {i + 1} of your request contained an incomplete email "
+                        "draft (unfilled placeholder). Please provide the full details."
+                    )
+                },
+                reasoning=f"Task {i + 1} email draft had a bracketed placeholder — plan rejected.",
+            )
+
+        # Step 4 — clean email body
+        if task.tool == "send_email" and "body" in task.args:
+            task.args["body"] = _clean_email_body(task.args["body"], sender_name=sender_name)
+
+        # Whole-plan rejection: if validation overrode this task to "none",
+        # the entire plan is unsafe to execute.
+        if task.tool == "none":
+            print(
+                f"[TaskPlan Validation] Task {i + 1} failed validation "
+                f"(overridden to 'none') — rejecting entire plan."
+            )
+            return ToolCall(
+                tool="none",
+                args={
+                    "message": (
+                        task.args.get("message")
+                        or (
+                            f"Task {i + 1} of your request could not be validated. "
+                            "Could you provide more details?"
+                        )
+                    )
+                },
+                reasoning=(
+                    f"Task {i + 1} failed validation — the entire plan was rejected "
+                    "to prevent partial execution."
+                ),
+            )
+
+        validated_tasks.append(task)
+
+    # All tasks passed — return the plan with validated (potentially updated) tasks.
+    return TaskPlan(tasks=validated_tasks, reasoning=plan.reasoning)
 
 def _clean_json_str(text: str) -> str:
     """Helper to strip markdown code blocks from model JSON output."""

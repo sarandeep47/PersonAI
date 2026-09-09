@@ -1,6 +1,6 @@
 # agent/schemas.py
 from pydantic import BaseModel, Field
-from typing import Literal, Union, Dict, Any
+from typing import List, Literal, Union, Dict, Any
 
 class SendEmailArgs(BaseModel):
     to: str = Field(..., description="Recipient email address — must be a valid email")
@@ -38,3 +38,7 @@ class ToolCall(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
     reasoning: str = Field(default="No reasoning provided.", description="One sentence explaining why this tool was chosen")
 
+
+class TaskPlan(BaseModel):
+    tasks: List[ToolCall]
+    reasoning: str
