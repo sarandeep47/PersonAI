@@ -5,7 +5,7 @@ from typing import List, Dict, Optional, Union
 from pydantic import ValidationError
 from tenacity import retry, wait_exponential, stop_after_attempt
 import config
-from agent.schemas import ToolCall, TaskPlan
+from agent.schemas import ToolCall, TaskPlan, TOOL_ARGS_SCHEMAS, ScheduleCalendarArgs, ListCalendarArgs
 from agent.prompts import AGENT_SYSTEM_PROMPT, REVISE_DRAFT_SYSTEM_PROMPT
 import db.session as db
 
@@ -134,6 +134,7 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
       it may contain emails of contacts that have since been deleted.
 
     For draft_reply, email_id must appear literally in user_message or history.
+    For calendar tools, validate args against their Pydantic schema.
     """
     # --- Tier 1: trusted sources only (current message + live contacts) ---
     trusted_text = user_message.lower()
@@ -180,6 +181,22 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
             if hasattr(tool_call, "_was_retried"):
                 overridden._was_retried = tool_call._was_retried
             return overridden
+
+    elif tool_call.tool in ("schedule_calendar", "list_calendar"):
+        schema = TOOL_ARGS_SCHEMAS.get(tool_call.tool)
+        if schema:
+            try:
+                schema.model_validate(tool_call.args)
+            except ValidationError as ve:
+                print(f"[Validation] Invalid arguments for {tool_call.tool}: {ve}")
+                overridden = ToolCall(
+                    tool="none",
+                    args={"message": f"Invalid arguments provided for tool {tool_call.tool}."},
+                    reasoning=f"Argument validation failed for {tool_call.tool}: {ve}"
+                )
+                if hasattr(tool_call, "_was_retried"):
+                    overridden._was_retried = tool_call._was_retried
+                return overridden
 
     return tool_call
 
@@ -280,7 +297,9 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
                 if c_name and len(c_name) < 40 and c_name.lower() not in {"an email", "a mail", "email", "the"} and c_name.lower() not in _noise:
                     db.upsert_contact(chat_id, c_name, email_str)
 
-    system_prompt = AGENT_SYSTEM_PROMPT
+    from datetime import datetime
+    now_dt = datetime.now().astimezone()
+    system_prompt = AGENT_SYSTEM_PROMPT + f"\n\nCurrent Date and Time Context: {now_dt.strftime('%Y-%m-%d %H:%M:%S')} ({now_dt.strftime('%A')})"
     sender_name = None
     if chat_id:
         user_prof = db.get_user_profile(chat_id)

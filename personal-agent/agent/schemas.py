@@ -1,6 +1,7 @@
 # agent/schemas.py
-from pydantic import BaseModel, Field
-from typing import List, Literal, Union, Dict, Any
+from datetime import datetime
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Literal, Union, Dict, Any, Optional
 
 class SendEmailArgs(BaseModel):
     to: str = Field(..., description="Recipient email address — must be a valid email")
@@ -31,14 +32,107 @@ class RenameContactArgs(BaseModel):
 class NoneArgs(BaseModel):
     message: str = Field(..., description="Response/question to show to the user")
 
-ToolName = Literal["send_email", "search_inbox", "read_email", "draft_reply", "export_contacts", "delete_contact", "rename_contact", "none"]
+class ScheduleCalendarArgs(BaseModel):
+    title: str = Field(..., description="Title or summary of the calendar event")
+    date: str = Field(..., description="Date string in YYYY-MM-DD format")
+    start_time: str = Field(..., description="Start time string (e.g. '14:00' or '02:00 PM')")
+    duration_minutes: int = Field(..., gt=0, description="Duration in minutes (must be > 0)")
+    attendees: Optional[List[str]] = Field(default=None, description="Optional list of attendee email addresses")
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Title must not be empty.")
+        return v.strip()
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v: str) -> str:
+        clean = v.strip()
+        try:
+            datetime.strptime(clean, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("Date must be in YYYY-MM-DD format.")
+        return clean
+
+    @field_validator("start_time")
+    @classmethod
+    def validate_start_time(cls, v: str) -> str:
+        clean = v.strip()
+        valid = False
+        for fmt in ["%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p"]:
+            try:
+                datetime.strptime(clean, fmt)
+                valid = True
+                break
+            except ValueError:
+                continue
+        if not valid:
+            raise ValueError("Start time must be a valid time string (e.g., '14:00' or '02:00 PM').")
+        return clean
+
+    @field_validator("attendees")
+    @classmethod
+    def validate_attendees(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        for email in v:
+            if not isinstance(email, str) or "@" not in email or "." not in email:
+                raise ValueError(f"Invalid attendee email: {email}")
+        return v
+
+class ListCalendarArgs(BaseModel):
+    start_datetime: Optional[str] = Field(default=None, description="Optional ISO format start datetime string")
+    end_datetime: Optional[str] = Field(default=None, description="Optional ISO format end datetime string")
+
+    @field_validator("start_datetime", "end_datetime")
+    @classmethod
+    def validate_iso_dt(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        clean = v.strip()
+        try:
+            if len(clean) == 10:
+                datetime.strptime(clean, "%Y-%m-%d")
+            else:
+                datetime.fromisoformat(clean)
+        except ValueError:
+            raise ValueError(f"Invalid ISO datetime string: '{clean}'")
+        return clean
+
+ToolName = Literal[
+    "send_email",
+    "search_inbox",
+    "read_email",
+    "draft_reply",
+    "export_contacts",
+    "delete_contact",
+    "rename_contact",
+    "schedule_calendar",
+    "list_calendar",
+    "none",
+]
 
 class ToolCall(BaseModel):
     tool: ToolName
     args: Dict[str, Any] = Field(default_factory=dict)
     reasoning: str = Field(default="No reasoning provided.", description="One sentence explaining why this tool was chosen")
 
-
 class TaskPlan(BaseModel):
     tasks: List[ToolCall]
     reasoning: str
+
+TOOL_ARGS_SCHEMAS: Dict[str, type[BaseModel]] = {
+    "send_email": SendEmailArgs,
+    "search_inbox": SearchInboxArgs,
+    "read_email": ReadEmailArgs,
+    "draft_reply": DraftReplyArgs,
+    "export_contacts": ExportContactsArgs,
+    "delete_contact": DeleteContactArgs,
+    "rename_contact": RenameContactArgs,
+    "schedule_calendar": ScheduleCalendarArgs,
+    "list_calendar": ListCalendarArgs,
+    "none": NoneArgs,
+}
+

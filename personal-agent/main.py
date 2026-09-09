@@ -6,6 +6,7 @@ import os
 from tools.email_reader import fetch_unread_emails
 from tools.telegram import send_telegram_message, get_telegram_updates, answer_callback_query, download_telegram_file, send_telegram_document
 from tools.email_sender import send_email_raw
+from tools.calendar import create_event, list_upcoming_events
 from agent.core import call_agent, revise_draft
 from agent.schemas import TaskPlan
 import db.session as db
@@ -108,6 +109,16 @@ def handle_message(chat_id: str, text: str, attachment_path: str = None):
         if tool_call.tool == "send_email":
             args = tool_call.args
             _present_email_confirmation(chat_id, args, attachment_path=attachment_path)
+
+        elif tool_call.tool == "schedule_calendar":
+            args = tool_call.args
+            _present_calendar_confirmation(chat_id, args)
+
+        elif tool_call.tool == "list_calendar":
+            send_telegram_message("📅 Checking your calendar...", chat_id=chat_id)
+            success, output_msg = execute_single_tool_call(tool_call, chat_id)
+            send_telegram_message(output_msg, chat_id=chat_id)
+            db.add_message(chat_id, "assistant", output_msg)
 
         elif tool_call.tool == "export_contacts":
             send_telegram_message("📊 Exporting your contacts database to a Google Sheet / CSV spreadsheet...", chat_id=chat_id)
@@ -281,20 +292,73 @@ def _present_email_confirmation(chat_id: str, args: dict, attachment_path: str =
     db.add_message(chat_id, "assistant", assistant_summary)
 
 
+def _present_calendar_confirmation(chat_id: str, args: dict):
+    """Present calendar event creation with inline confirmation buttons."""
+    title = str(args.get("title", "")).strip()
+    date = str(args.get("date", "")).strip()
+    start_time = str(args.get("start_time", "")).strip()
+    duration_minutes = args.get("duration_minutes", 30)
+    attendees = args.get("attendees") or []
+
+    if not title or not date or not start_time:
+        msg = "⚠️ Please specify title, date, and start time for the calendar event."
+        send_telegram_message(msg, chat_id=chat_id)
+        db.add_message(chat_id, "assistant", msg)
+        return
+
+    action_id = f"cal_{uuid.uuid4().hex[:8]}"
+    db.save_pending_action(action_id, chat_id, "confirm_schedule_calendar", {
+        "title": title,
+        "date": date,
+        "start_time": start_time,
+        "duration_minutes": duration_minutes,
+        "attendees": attendees,
+    })
+
+    attendee_info = ""
+    if attendees:
+        attendee_info = f"\n👥 *Attendees:* `{', '.join(attendees)}`"
+
+    msg = (
+        f"📅 *Calendar Event — Ready for Confirmation*\n\n"
+        f"📌 *Title:* {title}\n"
+        f"📆 *Date:* `{date}`\n"
+        f"⏰ *Time:* `{start_time}` ({duration_minutes} mins)"
+        f"{attendee_info}\n\n"
+        f"────────────────\n"
+        f"Tap an action below:"
+    )
+
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Confirm Event", "callback_data": f"confirm_cal:{action_id}"},
+                {"text": "❌ Cancel", "callback_data": f"cancel_cal:{action_id}"}
+            ]
+        ]
+    }
+    send_telegram_message(msg, reply_markup=reply_markup, chat_id=chat_id)
+
+    assistant_summary = f"Asked for confirmation to schedule calendar event '{title}' on {date} at {start_time}."
+    db.add_message(chat_id, "assistant", assistant_summary)
+
+
 # ──────────────────────────────────────────────
 # TASK PLAN CONFIRMATION UI  (Phase 2.5)
 # ──────────────────────────────────────────────
 
 # Maps internal tool names to user-friendly display names.
 _TOOL_DISPLAY_NAMES = {
-    "send_email":      "Send email",
-    "search_inbox":    "Search emails",
-    "read_email":      "Read email",
-    "draft_reply":     "Draft reply",
-    "export_contacts": "Export contacts",
-    "delete_contact":  "Delete contact",
-    "rename_contact":  "Rename contact",
-    "none":            "No action",
+    "send_email":        "Send email",
+    "search_inbox":      "Search emails",
+    "read_email":        "Read email",
+    "draft_reply":       "Draft reply",
+    "export_contacts":   "Export contacts",
+    "delete_contact":    "Delete contact",
+    "rename_contact":    "Rename contact",
+    "schedule_calendar": "Schedule calendar event",
+    "list_calendar":     "List calendar events",
+    "none":              "No action",
 }
 
 
@@ -306,32 +370,24 @@ def _format_tool_name(tool: str) -> str:
 def _format_task_plan_confirmation(plan: TaskPlan) -> str:
     """
     Build a readable Telegram Markdown confirmation message for a validated TaskPlan.
-
-    Format:
-        📋 *Planned Actions*
-
-        1. Send email
-           To: boss@example.com
-           Subject: Invoice
-
-        2. Search emails
-           Query: invoice
-
-        Reasoning:
-        Find the invoice, then forward it.
-
-        2 actions ready.
     """
     lines = ["\ud83d\udccb *Planned Actions*\n"]
 
     # Argument keys that are worth showing and their friendly labels
     _ARG_LABELS = {
-        "to":           "To",
-        "subject":      "Subject",
-        "query":        "Query",
-        "email_id":     "Email ID",
-        "instructions": "Instructions",
-        "new_name":     "New name",
+        "to":               "To",
+        "subject":          "Subject",
+        "query":            "Query",
+        "email_id":         "Email ID",
+        "instructions":     "Instructions",
+        "new_name":         "New name",
+        "title":            "Title",
+        "date":             "Date",
+        "start_time":       "Start time",
+        "duration_minutes": "Duration (min)",
+        "attendees":        "Attendees",
+        "start_datetime":   "From",
+        "end_datetime":     "To",
     }
     # Max characters to show for long string values (body is intentionally omitted)
     _SHOW_MAX = 120
@@ -574,6 +630,59 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
             else:
                 return False, f"No saved contact found matching `{query}`."
 
+        elif tool_name == "schedule_calendar":
+            title = str(args.get("title", "")).strip()
+            date = str(args.get("date", "")).strip()
+            start_time = str(args.get("start_time", "")).strip()
+            duration_minutes = args.get("duration_minutes", 30)
+            attendees = args.get("attendees")
+
+            if not title or not date or not start_time:
+                return False, "Title, date, and start_time are required to schedule a calendar event."
+
+            res = create_event(
+                title=title,
+                date=date,
+                start_time=start_time,
+                duration_minutes=duration_minutes,
+                attendees=attendees,
+            )
+            if isinstance(res, dict) and res.get("status") == "success":
+                link_info = f"\n🔗 [Open in Google Calendar]({res['htmlLink']})" if res.get("htmlLink") else ""
+                summary = (
+                    f"✅ *Calendar Event Created!*\n\n"
+                    f"📌 *Title:* {res.get('title')}\n"
+                    f"⏰ *Start:* `{res.get('start')}`\n"
+                    f"🏁 *End:* `{res.get('end')}`"
+                    f"{link_info}"
+                )
+                return True, summary
+            else:
+                err_msg = res.get("message", "Failed to create calendar event.") if isinstance(res, dict) else "Failed to create calendar event."
+                return False, err_msg
+
+        elif tool_name == "list_calendar":
+            start_dt = args.get("start_datetime")
+            end_dt = args.get("end_datetime")
+
+            events = list_upcoming_events(start_datetime=start_dt, end_datetime=end_dt)
+            if not isinstance(events, list):
+                return False, "Execution error: Unexpected result format from calendar reader."
+
+            if not events:
+                return True, "📅 You have no calendar events during that period."
+
+            lines = ["📅 *Upcoming Calendar Events:*\n"]
+            for ev in events:
+                t = ev.get("title", "(No Title)")
+                s = ev.get("start", "")
+                e = ev.get("end", "")
+                atts = ev.get("attendees", [])
+                att_str = f"\n   👥 Attendees: {', '.join(atts)}" if atts else ""
+                lines.append(f"• *{t}*\n   ⏰ `{s}` to `{e}`{att_str}")
+
+            return True, "\n\n".join(lines)
+
         elif tool_name == "none":
             msg = str(args.get("message", "No action executed.")).strip()
             return True, msg
@@ -721,6 +830,40 @@ def handle_callback_query(cq: dict):
     elif cmd == "cancel_del":
         answer_callback_query(cq_id, "Cancelled.")
         send_telegram_message("❌ Contact removal cancelled.", chat_id=chat_id)
+        db.delete_pending_action(action_id)
+
+    elif cmd == "confirm_cal":
+        payload = action.get("payload", {})
+        answer_callback_query(cq_id, "Scheduling event...")
+        send_telegram_message("⏳ Creating calendar event...", chat_id=chat_id)
+
+        res = create_event(
+            title=payload.get("title", ""),
+            date=payload.get("date", ""),
+            start_time=payload.get("start_time", ""),
+            duration_minutes=payload.get("duration_minutes", 30),
+            attendees=payload.get("attendees"),
+        )
+        if isinstance(res, dict) and res.get("status") == "success":
+            link_info = f"\n🔗 [Open in Google Calendar]({res['htmlLink']})" if res.get("htmlLink") else ""
+            msg = (
+                f"✅ *Calendar Event Created!*\n\n"
+                f"📌 *Title:* {res.get('title')}\n"
+                f"⏰ *Start:* `{res.get('start')}`\n"
+                f"🏁 *End:* `{res.get('end')}`"
+                f"{link_info}"
+            )
+            send_telegram_message(msg, chat_id=chat_id)
+            db.add_message(chat_id, "assistant", f"Created calendar event '{res.get('title')}' for {res.get('start')}.")
+        else:
+            err_msg = res.get("message", "Failed to create calendar event.") if isinstance(res, dict) else "Failed to create calendar event."
+            send_telegram_message(f"❌ {err_msg}", chat_id=chat_id)
+
+        db.delete_pending_action(action_id)
+
+    elif cmd == "cancel_cal":
+        answer_callback_query(cq_id, "Cancelled.")
+        send_telegram_message("❌ Calendar event creation cancelled.", chat_id=chat_id)
         db.delete_pending_action(action_id)
 
     # ── Phase 2.7 & 2.8: TaskPlan multi-task execution callbacks ─────────

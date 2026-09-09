@@ -1,12 +1,20 @@
 # personal-agent/config.py
 # Fill in your credentials here
 
-# --- Gmail ---
+# --- Gmail & Google OAuth ---
 EMAIL_ADDRESS = "sade74off@gmail.com"
 EMAIL_APP_PASSWORD = "afcp sslm qoym wkxh"  # Not your real password! See README for how to get this.
 IMAP_SERVER = "imap.gmail.com"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
+
+GOOGLE_CREDENTIALS_FILE = "credentials.json"
+GOOGLE_TOKEN_FILE = "token.json"
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar.events",
+]
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = "8691121331:AAGiw3NMqJgZkwoYMXSX7FTFPQmFFyk5zjM"   # Get from @BotFather
