@@ -359,8 +359,8 @@ class TestPhase25ConfirmationUI(unittest.TestCase):
             handle_callback_query(cq)
             mock_email.assert_not_called()
 
-        # Pending action must NOT be deleted (Phase 2.6 will need it)
-        mock_delete.assert_not_called()
+        # Pending action is deleted atomically upon execution
+        mock_delete.assert_called_once_with(action_id)
         # But answer_callback_query must have been called
         mock_answer.assert_called_once()
         print("  [PASS] Test 10 — plan_execute stub: no tools executed, action preserved")

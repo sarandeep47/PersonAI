@@ -582,17 +582,7 @@ def revise_draft(original_draft: dict, user_feedback: str, chat_id: Optional[str
         system_prompt += f"\nNote: User Sender Name is '{sender_name}'. Ensure email sign-off uses '{sender_name}'."
 
     messages = [{"role": "user", "content": f"Please update the draft according to these instructions: {user_feedback}"}]
-    
-    print("\n--- [DEBUG REVISE_DRAFT PROMPT] ---")
-    print(f"SYSTEM PROMPT:\n{system_prompt}")
-    print(f"USER FEEDBACK: {user_feedback}")
-    print("-----------------------------------\n")
-
     raw_response = _ollama_chat(messages, system_prompt)
-
-    print("\n--- [DEBUG RAW OLLAMA RESPONSE] ---")
-    print(raw_response)
-    print("-----------------------------------\n")
 
     res = None
     try:

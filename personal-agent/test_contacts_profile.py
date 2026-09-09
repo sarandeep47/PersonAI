@@ -7,6 +7,7 @@ from agent.schemas import ToolCall
 class TestContactsAndUserProfile(unittest.TestCase):
     def setUp(self):
         self.chat_id = "test_contacts_user_123"
+        db.init_db()
         # Clean up database state for test user before each test
         conn = db.get_db()
         with conn:

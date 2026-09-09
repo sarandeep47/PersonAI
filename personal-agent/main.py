@@ -417,6 +417,238 @@ def _present_task_plan_confirmation(chat_id: str, plan: TaskPlan) -> None:
     db.add_message(chat_id, "assistant", summary)
 
 
+# ──────────────────────────────────────────────
+# TOOL EXECUTION & TASK PLAN DISPATCH (Phase 2.7 & 2.8)
+# ──────────────────────────────────────────────
+
+def _sanitize_error_message(err: Exception) -> str:
+    """
+    Sanitize exception messages so raw OAuth tokens, credentials, stack traces,
+    or internal database/file paths are never exposed to Telegram users.
+    """
+    if not err:
+        return "Execution error: An unknown error occurred."
+
+    err_str = str(err).strip()
+    err_lower = err_str.lower()
+
+    # Keywords that indicate sensitive tokens, credentials, internal system info, or stack traces
+    sensitive_keywords = [
+        "token", "bearer", "authorization", "password", "secret", "key=", "api_key",
+        "sqlite", "database", "traceback", "line ", "file \"", "access_token",
+        "refresh_token", "credentials", "connection", "socket", "http", "https"
+    ]
+
+    for kw in sensitive_keywords:
+        if kw in err_lower:
+            return "Execution error: Unable to complete this action due to an unexpected error."
+
+    # Truncate long error messages to prevent exposing internal dumps
+    if len(err_str) > 100:
+        err_str = err_str[:100] + "..."
+
+    return f"Execution error: {err_str}"
+
+
+def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path: str = None) -> tuple[bool, str]:
+    """
+    Execute a single ToolCall instance safely.
+
+    Returns:
+        (success: bool, output_summary: str)
+    """
+    if not tool_call or not hasattr(tool_call, "tool"):
+        return False, "Execution error: Invalid tool call object."
+
+    tool_name = getattr(tool_call, "tool", None)
+    args = getattr(tool_call, "args", {}) or {}
+
+    if not isinstance(args, dict):
+        return False, "Execution error: Invalid tool arguments format."
+
+    try:
+        if tool_name == "send_email":
+            to = str(args.get("to", "")).strip()
+            subject = str(args.get("subject", "")).strip()
+            body = str(args.get("body", "")).strip()
+
+            if not to or "@" not in to:
+                return False, "Invalid recipient email address."
+
+            success = send_email_raw(
+                to,
+                subject,
+                body,
+                attachment_path=attachment_path or args.get("attachment_path")
+            )
+            if success:
+                return True, f"Email successfully sent to `{to}`."
+            else:
+                return False, "Failed to send email. Check configuration/logs."
+
+        elif tool_name == "search_inbox":
+            query = str(args.get("query", "")).strip()
+            emails = fetch_unread_emails()
+            if not isinstance(emails, list):
+                return False, "Execution error: Unexpected result format from email reader."
+
+            if not query:
+                matching = emails
+            else:
+                query_lower = query.lower()
+                matching = [
+                    e for e in emails
+                    if isinstance(e, dict) and (query_lower in e.get("subject", "").lower() or query_lower in e.get("body", "").lower())
+                ]
+
+            if matching:
+                summary = f"Found {len(matching)} matching email(s)."
+                return True, summary
+            else:
+                return True, f"No emails found matching `{query}`."
+
+        elif tool_name == "read_email":
+            email_id = str(args.get("email_id", "")).strip()
+            if not email_id:
+                return False, "Email ID required."
+            return True, f"Read email `{email_id}` successfully."
+
+        elif tool_name == "draft_reply":
+            email_id = str(args.get("email_id", "")).strip()
+            instructions = str(args.get("instructions", "")).strip()
+            if not email_id:
+                return False, "Email ID required to draft reply."
+            return True, f"Drafted reply for email `{email_id}`."
+
+        elif tool_name == "export_contacts":
+            csv_path = db.export_contacts_csv(chat_id)
+            if csv_path:
+                send_telegram_document(
+                    csv_path,
+                    caption="📊 *Here is your contacts database export (Google Sheet / Excel compatible CSV file).*",
+                    chat_id=chat_id
+                )
+                return True, "Exported contacts database to CSV file."
+            else:
+                return True, "No saved contacts to export."
+
+        elif tool_name == "delete_contact":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return False, "Contact query required for deletion."
+
+            matches = db.find_contacts_matching_query(chat_id, query)
+            if not isinstance(matches, list):
+                return False, "Execution error: Unexpected result format from contacts database."
+
+            if len(matches) == 1:
+                matched = matches[0]
+                db.delete_contact(chat_id, matched["name"])
+                db.scrub_contact_from_history(chat_id, matched["email"])
+                return True, f"Successfully removed *{matched['name']}* (`{matched['email']}`) from contacts."
+            elif len(matches) > 1:
+                return False, f"Multiple contacts match `{query}` — deletion halted for safety."
+            else:
+                return False, f"No saved contact found matching `{query}`."
+
+        elif tool_name == "rename_contact":
+            query = str(args.get("query", "")).strip()
+            new_name = str(args.get("new_name", "")).strip()
+            if not query or not new_name:
+                return False, "Contact query and new name required."
+
+            matches = db.find_contacts_matching_query(chat_id, query)
+            if not isinstance(matches, list):
+                return False, "Execution error: Unexpected result format from contacts database."
+
+            if len(matches) == 1:
+                matched = matches[0]
+                old_name = matched["name"]
+                success = db.rename_contact(chat_id, old_name, new_name)
+                if success:
+                    return True, f"Renamed contact *{old_name}* → *{new_name}* (`{matched['email']}`)."
+                else:
+                    return False, f"Could not rename contact `{old_name}`."
+            elif len(matches) > 1:
+                return False, f"Multiple contacts match `{query}` — rename halted for safety."
+            else:
+                return False, f"No saved contact found matching `{query}`."
+
+        elif tool_name == "none":
+            msg = str(args.get("message", "No action executed.")).strip()
+            return True, msg
+
+        else:
+            return False, f"Unknown tool `{tool_name}`."
+
+    except Exception as e:
+        return False, _sanitize_error_message(e)
+
+
+def execute_task_plan(plan: TaskPlan, chat_id: str) -> str:
+    """
+    Execute all tasks in a TaskPlan sequentially.
+
+    Stops immediately on the first task failure.
+    Returns a formatted Telegram Markdown summary of all task results.
+    """
+    results = []
+    stopped = False
+
+    for i, task in enumerate(plan.tasks, start=1):
+        if stopped:
+            results.append({
+                "index": i,
+                "task": task,
+                "status": "skipped",
+                "message": "Not executed (cancelled due to previous failure)."
+            })
+            continue
+
+        success, output_msg = execute_single_tool_call(task, chat_id)
+        if success:
+            results.append({
+                "index": i,
+                "task": task,
+                "status": "success",
+                "message": output_msg
+            })
+        else:
+            results.append({
+                "index": i,
+                "task": task,
+                "status": "failed",
+                "message": output_msg
+            })
+            stopped = True
+
+    completed_count = sum(1 for r in results if r["status"] == "success")
+    total_count = len(plan.tasks)
+
+    lines = ["📋 *Task Plan Execution Result*\n"]
+    for r in results:
+        task_name = _format_tool_name(r["task"].tool)
+        idx = r["index"]
+        if r["status"] == "success":
+            status_icon = "✅"
+        elif r["status"] == "failed":
+            status_icon = "❌"
+        else:
+            status_icon = "⏭️"
+
+        lines.append(f"{status_icon} *{idx}. {task_name}*")
+        lines.append(f"   {r['message']}")
+        lines.append("")
+
+    lines.append(f"*{completed_count}/{total_count} actions completed.*")
+    summary_text = "\n".join(lines)
+
+    # Log summary in conversation history
+    db.add_message(chat_id, "assistant", f"Executed TaskPlan ({completed_count}/{total_count} completed):\n{summary_text}")
+
+    return summary_text
+
+
 def handle_callback_query(cq: dict):
     """Handle callback button clicks from inline keyboards."""
     cq_id = cq["id"]
@@ -465,7 +697,6 @@ def handle_callback_query(cq: dict):
         db.delete_pending_action(f"editing_{chat_id}")
         send_telegram_message("❌ Draft cancelled.", chat_id=chat_id)
 
-
     elif cmd == "reply_prompt":
         answer_callback_query(cq_id, "Quick Reply")
         payload = action["payload"]
@@ -483,32 +714,72 @@ def handle_callback_query(cq: dict):
         payload = action["payload"]
         answer_callback_query(cq_id, "Deleting contact...")
         db.delete_contact(chat_id, payload["name"])
-        # Scrub the deleted contact's email from conversation_history and any
-        # queued pending_action payloads so it cannot resurface as LLM context.
         db.scrub_contact_from_history(chat_id, payload["email"])
         send_telegram_message(f"✅ Successfully removed *{payload['name']}* (`{payload['email']}`) from your contacts!", chat_id=chat_id)
         db.delete_pending_action(action_id)
 
     elif cmd == "cancel_del":
         answer_callback_query(cq_id, "Cancelled.")
-        send_telegram_message("\u274c Contact removal cancelled.", chat_id=chat_id)
+        send_telegram_message("❌ Contact removal cancelled.", chat_id=chat_id)
         db.delete_pending_action(action_id)
 
-    # ── Phase 2.5: TaskPlan confirmation callbacks ──────────────────────
+    # ── Phase 2.7 & 2.8: TaskPlan multi-task execution callbacks ─────────
     elif cmd == "plan_execute":
-        # Phase 2.5 stub: acknowledge the tap but defer actual execution to Phase 2.6.
-        # The pending action is intentionally NOT deleted so Phase 2.6 can pick it up.
-        answer_callback_query(cq_id, "\u23f3 Preparing to execute tasks...")
-        send_telegram_message(
-            "\u23f3 Task execution is being prepared. \n"
-            "(Phase 2.6 will implement full multi-task execution.)",
-            chat_id=chat_id
-        )
+        # 1. Verify action_type
+        if action.get("action_type") != "confirm_taskplan":
+            answer_callback_query(cq_id, "Invalid action type.")
+            send_telegram_message("⚠️ Invalid action type for task plan.", chat_id=chat_id)
+            return
+
+        # 2. Ownership / chat safety check
+        if str(action.get("chat_id")) != str(chat_id):
+            answer_callback_query(cq_id, "Unauthorized action.")
+            send_telegram_message("⚠️ You do not have permission to execute this plan.", chat_id=chat_id)
+            return
+
+        # 3. Reconstruct and validate TaskPlan from stored payload
+        payload = action.get("payload")
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError("Stored payload is not a dictionary.")
+            plan = TaskPlan.model_validate(payload)
+        except Exception:
+            answer_callback_query(cq_id, "Invalid task plan data.")
+            send_telegram_message("⚠️ The pending task plan is invalid or corrupted.", chat_id=chat_id)
+            db.delete_pending_action(action_id)
+            return
+
+        # 4. ONE-SHOT CONSUMPTION: Delete pending action BEFORE execution starts
+        # This prevents duplicate execution if Execute All is clicked twice rapidly.
+        db.delete_pending_action(action_id)
+
+        # 5. Acknowledge callback immediately
+        answer_callback_query(cq_id, "Executing tasks...")
+
+        # 6. Execute tasks sequentially and send final summary report
+        summary_msg = execute_task_plan(plan, chat_id)
+        try:
+            send_telegram_message(summary_msg, chat_id=chat_id)
+        except Exception as err:
+            print(f"[Telegram Error] Failed to send TaskPlan summary report: {err}")
 
     elif cmd == "plan_cancel":
-        answer_callback_query(cq_id, "Plan cancelled.")
+        # 1. Verify action_type
+        if action.get("action_type") != "confirm_taskplan":
+            answer_callback_query(cq_id, "Invalid action type.")
+            send_telegram_message("⚠️ Invalid action type for task plan.", chat_id=chat_id)
+            return
+
+        # 2. Ownership / chat safety check
+        if str(action.get("chat_id")) != str(chat_id):
+            answer_callback_query(cq_id, "Unauthorized action.")
+            send_telegram_message("⚠️ You do not have permission to cancel this plan.", chat_id=chat_id)
+            return
+
+        # 3. Delete action & acknowledge
         db.delete_pending_action(action_id)
-        send_telegram_message("\u274c Task plan cancelled.", chat_id=chat_id)
+        answer_callback_query(cq_id, "Plan cancelled.")
+        send_telegram_message("❌ Task plan cancelled.", chat_id=chat_id)
 
 
 

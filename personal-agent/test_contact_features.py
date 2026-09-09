@@ -7,6 +7,7 @@ from agent.core import call_agent
 class TestContactFeatures(unittest.TestCase):
     def setUp(self):
         self.chat_id = "test_feature_chat_456"
+        db.init_db()
         conn = db.get_db()
         with conn:
             conn.execute("DELETE FROM contacts WHERE chat_id = ?", (self.chat_id,))
