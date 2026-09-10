@@ -8,10 +8,28 @@ logger = logging.getLogger(__name__)
 
 
 def _sanitize_error(err: Exception) -> str:
-    """Sanitize error message to prevent leaking credentials or raw tokens."""
+    """
+    Sanitize error message to return user-friendly, safe error description
+    without exposing credentials, tokens, stack traces, or internal paths.
+    """
     if not err:
-        return "Unknown error"
-    return "Calendar API error: Unable to complete requested calendar operation."
+        return "Calendar API error: ⚠️ I couldn't create the calendar event right now.\n\nPlease try again in a moment."
+
+    err_str = str(err)
+    err_lower = err_str.lower()
+
+    # Check for authentication / authorization errors
+    auth_keywords = ["auth", "credential", "permission", "unauthorized", "forbidden", "401", "403", "login", "consent", "token", "bearer"]
+    if any(k in err_lower for k in auth_keywords) or isinstance(err, (FileNotFoundError, PermissionError, RuntimeError)):
+        return "Calendar API error: ⚠️ I couldn't access Google Calendar.\n\nPlease reconnect your Google account and try again."
+
+    # Check for invalid request / format errors
+    invalid_keywords = ["valueerror", "invalid", "malformed", "parse", "format", "400"]
+    if any(k in err_lower for k in invalid_keywords) or isinstance(err, ValueError):
+        return "Calendar API error: ⚠️ I couldn't create that calendar event because the event details were invalid."
+
+    # Default API / network / generic failure
+    return "Calendar API error: ⚠️ I couldn't create the calendar event right now.\n\nPlease try again in a moment."
 
 
 def _parse_datetime(date_str: str, time_str: str) -> datetime:

@@ -3,6 +3,7 @@ import time
 import uuid
 
 import os
+from datetime import datetime, timedelta
 from tools.email_reader import fetch_unread_emails
 from tools.telegram import send_telegram_message, get_telegram_updates, answer_callback_query, download_telegram_file, send_telegram_document
 from tools.email_sender import send_email_raw
@@ -292,6 +293,65 @@ def _present_email_confirmation(chat_id: str, args: dict, attachment_path: str =
     db.add_message(chat_id, "assistant", assistant_summary)
 
 
+def _format_calendar_datetime_range(date_str: str, time_str: str, duration_minutes: int = 30) -> tuple[str, str]:
+    """
+    Format date and start/end time range for Telegram calendar confirmation UX.
+    Returns (formatted_date, formatted_time_range).
+    """
+    try:
+        from tools.calendar import _parse_datetime
+        start_dt = _parse_datetime(date_str, time_str)
+        end_dt = start_dt + timedelta(minutes=duration_minutes)
+
+        formatted_date = start_dt.strftime("%A, %B ") + str(start_dt.day) + start_dt.strftime(", %Y")
+        start_time_fmt = start_dt.strftime("%I:%M %p").lstrip("0")
+        end_time_fmt = end_dt.strftime("%I:%M %p").lstrip("0")
+        formatted_time_range = f"{start_time_fmt} – {end_time_fmt}"
+        return formatted_date, formatted_time_range
+    except Exception:
+        return date_str, f"{time_str} ({duration_minutes} mins)"
+
+
+def _format_calendar_success_message(res: dict) -> str:
+    """Format concise user-facing success feedback for calendar event creation."""
+    title = res.get("title") or "Calendar Event"
+    start_raw = res.get("start")
+    end_raw = res.get("end")
+    html_link = res.get("htmlLink")
+
+    date_str = ""
+    time_str = ""
+
+    if start_raw:
+        try:
+            start_dt = datetime.fromisoformat(str(start_raw))
+            date_str = start_dt.strftime("%A, %B ") + str(start_dt.day)
+            start_time_fmt = start_dt.strftime("%I:%M %p").lstrip("0")
+
+            if end_raw:
+                end_dt = datetime.fromisoformat(str(end_raw))
+                end_time_fmt = end_dt.strftime("%I:%M %p").lstrip("0")
+                time_str = f"{start_time_fmt} – {end_time_fmt}"
+            else:
+                time_str = start_time_fmt
+        except Exception:
+            date_str = str(start_raw)
+            if end_raw:
+                time_str = f"{start_raw} – {end_raw}"
+
+    lines = ["✅ *Calendar event created*", "", f"*{title}*"]
+    if date_str:
+        lines.append(date_str)
+    if time_str:
+        lines.append(time_str)
+
+    if html_link:
+        lines.append("")
+        lines.append(f"🔗 [Open in Google Calendar]({html_link})")
+
+    return "\n".join(lines)
+
+
 def _present_calendar_confirmation(chat_id: str, args: dict):
     """Present calendar event creation with inline confirmation buttons."""
     title = str(args.get("title", "")).strip()
@@ -315,24 +375,27 @@ def _present_calendar_confirmation(chat_id: str, args: dict):
         "attendees": attendees,
     })
 
+    formatted_date, formatted_time_range = _format_calendar_datetime_range(date, start_time, duration_minutes)
+
     attendee_info = ""
     if attendees:
-        attendee_info = f"\n👥 *Attendees:* `{', '.join(attendees)}`"
+        clean_attendees = [str(a).strip() for a in attendees if str(a).strip()]
+        if clean_attendees:
+            attendee_info = f"\n*Attendees:* {', '.join(clean_attendees)}"
 
     msg = (
-        f"📅 *Calendar Event — Ready for Confirmation*\n\n"
-        f"📌 *Title:* {title}\n"
-        f"📆 *Date:* `{date}`\n"
-        f"⏰ *Time:* `{start_time}` ({duration_minutes} mins)"
+        f"📅 *Schedule Calendar Event?*\n\n"
+        f"*Title:* {title}\n"
+        f"*Date:* {formatted_date}\n"
+        f"*Time:* {formatted_time_range}"
         f"{attendee_info}\n\n"
-        f"────────────────\n"
-        f"Tap an action below:"
+        f"Create this event?"
     )
 
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "✅ Confirm Event", "callback_data": f"confirm_cal:{action_id}"},
+                {"text": "✅ Confirm", "callback_data": f"confirm_cal:{action_id}"},
                 {"text": "❌ Cancel", "callback_data": f"cancel_cal:{action_id}"}
             ]
         ]
@@ -648,14 +711,7 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
                 attendees=attendees,
             )
             if isinstance(res, dict) and res.get("status") == "success":
-                link_info = f"\n🔗 [Open in Google Calendar]({res['htmlLink']})" if res.get("htmlLink") else ""
-                summary = (
-                    f"✅ *Calendar Event Created!*\n\n"
-                    f"📌 *Title:* {res.get('title')}\n"
-                    f"⏰ *Start:* `{res.get('start')}`\n"
-                    f"🏁 *End:* `{res.get('end')}`"
-                    f"{link_info}"
-                )
+                summary = _format_calendar_success_message(res)
                 return True, summary
             else:
                 err_msg = res.get("message", "Failed to create calendar event.") if isinstance(res, dict) else "Failed to create calendar event."
@@ -759,170 +815,201 @@ def execute_task_plan(plan: TaskPlan, chat_id: str) -> str:
 
 
 def handle_callback_query(cq: dict):
-    """Handle callback button clicks from inline keyboards."""
-    cq_id = cq["id"]
-    data = cq.get("data", "")
-    chat_id = str(cq.get("message", {}).get("chat", {}).get("id", config.TELEGRAM_CHAT_ID))
+    """Handle callback button clicks from inline keyboards safely."""
+    cq_id = cq.get("id", "") if isinstance(cq, dict) else ""
+    chat_id = str(cq.get("message", {}).get("chat", {}).get("id", config.TELEGRAM_CHAT_ID)) if isinstance(cq, dict) else str(config.TELEGRAM_CHAT_ID)
 
-    if ":" not in data:
-        answer_callback_query(cq_id, "Invalid action.")
-        return
+    try:
+        data = cq.get("data", "")
 
-    cmd, action_id = data.split(":", 1)
-    action = db.get_pending_action(action_id)
+        if ":" not in data:
+            answer_callback_query(cq_id, "Invalid action.")
+            return
 
-    if not action and cmd not in ["dismiss"]:
-        answer_callback_query(cq_id, "Action expired or already completed.")
-        send_telegram_message("⚠️ That confirmation has expired.", chat_id=chat_id)
-        return
+        cmd, action_id = data.split(":", 1)
+        action = db.get_pending_action(action_id)
 
-    if cmd == "confirm":
-        payload = action["payload"]
-        answer_callback_query(cq_id, "Sending email...")
-        send_telegram_message("📤 Sending email...", chat_id=chat_id)
-        
-        success = send_email_raw(
-            payload["to"],
-            payload["subject"],
-            payload["body"],
-            attachment_path=payload.get("attachment_path")
-        )
-        if success:
-            send_telegram_message(f"✅ Email successfully sent to *{payload['to']}*!", chat_id=chat_id)
-        else:
-            send_telegram_message("❌ Failed to send email. Check configuration/logs.", chat_id=chat_id)
-        db.delete_pending_action(action_id)
-        db.delete_pending_action(f"editing_{chat_id}")
+        if not action and cmd not in ["dismiss"]:
+            answer_callback_query(cq_id, "Action expired or already completed.")
+            send_telegram_message("⚠️ That confirmation has expired.", chat_id=chat_id)
+            return
 
-    elif cmd == "edit":
-        payload = action["payload"]
-        answer_callback_query(cq_id, "Editing draft...")
-        db.save_pending_action(f"editing_{chat_id}", chat_id, "editing", payload, ttl_seconds=300)
-        send_telegram_message("✏️ Reply to this message with your instructions on what to change in the draft.", chat_id=chat_id)
-
-    elif cmd == "cancel":
-        answer_callback_query(cq_id, "Draft cancelled.")
-        db.delete_pending_action(action_id)
-        db.delete_pending_action(f"editing_{chat_id}")
-        send_telegram_message("❌ Draft cancelled.", chat_id=chat_id)
-
-    elif cmd == "reply_prompt":
-        answer_callback_query(cq_id, "Quick Reply")
-        payload = action["payload"]
-        db.save_pending_action(f"editing_{chat_id}", chat_id, "editing", {
-            "to": payload["sender"],
-            "subject": f"Re: {payload['subject']}",
-            "body": ""
-        }, ttl_seconds=300)
-        send_telegram_message(f"💬 What would you like to reply to *{payload['sender']}*?", chat_id=chat_id)
-
-    elif cmd == "dismiss":
-        answer_callback_query(cq_id, "Dismissed.")
-
-    elif cmd == "confirm_del":
-        payload = action["payload"]
-        answer_callback_query(cq_id, "Deleting contact...")
-        db.delete_contact(chat_id, payload["name"])
-        db.scrub_contact_from_history(chat_id, payload["email"])
-        send_telegram_message(f"✅ Successfully removed *{payload['name']}* (`{payload['email']}`) from your contacts!", chat_id=chat_id)
-        db.delete_pending_action(action_id)
-
-    elif cmd == "cancel_del":
-        answer_callback_query(cq_id, "Cancelled.")
-        send_telegram_message("❌ Contact removal cancelled.", chat_id=chat_id)
-        db.delete_pending_action(action_id)
-
-    elif cmd == "confirm_cal":
-        payload = action.get("payload", {})
-        answer_callback_query(cq_id, "Scheduling event...")
-        send_telegram_message("⏳ Creating calendar event...", chat_id=chat_id)
-
-        res = create_event(
-            title=payload.get("title", ""),
-            date=payload.get("date", ""),
-            start_time=payload.get("start_time", ""),
-            duration_minutes=payload.get("duration_minutes", 30),
-            attendees=payload.get("attendees"),
-        )
-        if isinstance(res, dict) and res.get("status") == "success":
-            link_info = f"\n🔗 [Open in Google Calendar]({res['htmlLink']})" if res.get("htmlLink") else ""
-            msg = (
-                f"✅ *Calendar Event Created!*\n\n"
-                f"📌 *Title:* {res.get('title')}\n"
-                f"⏰ *Start:* `{res.get('start')}`\n"
-                f"🏁 *End:* `{res.get('end')}`"
-                f"{link_info}"
+        if cmd == "confirm":
+            payload = action["payload"]
+            answer_callback_query(cq_id, "Sending email...")
+            send_telegram_message("📤 Sending email...", chat_id=chat_id)
+            
+            success = send_email_raw(
+                payload["to"],
+                payload["subject"],
+                payload["body"],
+                attachment_path=payload.get("attachment_path")
             )
-            send_telegram_message(msg, chat_id=chat_id)
-            db.add_message(chat_id, "assistant", f"Created calendar event '{res.get('title')}' for {res.get('start')}.")
-        else:
-            err_msg = res.get("message", "Failed to create calendar event.") if isinstance(res, dict) else "Failed to create calendar event."
-            send_telegram_message(f"❌ {err_msg}", chat_id=chat_id)
-
-        db.delete_pending_action(action_id)
-
-    elif cmd == "cancel_cal":
-        answer_callback_query(cq_id, "Cancelled.")
-        send_telegram_message("❌ Calendar event creation cancelled.", chat_id=chat_id)
-        db.delete_pending_action(action_id)
-
-    # ── Phase 2.7 & 2.8: TaskPlan multi-task execution callbacks ─────────
-    elif cmd == "plan_execute":
-        # 1. Verify action_type
-        if action.get("action_type") != "confirm_taskplan":
-            answer_callback_query(cq_id, "Invalid action type.")
-            send_telegram_message("⚠️ Invalid action type for task plan.", chat_id=chat_id)
-            return
-
-        # 2. Ownership / chat safety check
-        if str(action.get("chat_id")) != str(chat_id):
-            answer_callback_query(cq_id, "Unauthorized action.")
-            send_telegram_message("⚠️ You do not have permission to execute this plan.", chat_id=chat_id)
-            return
-
-        # 3. Reconstruct and validate TaskPlan from stored payload
-        payload = action.get("payload")
-        try:
-            if not isinstance(payload, dict):
-                raise ValueError("Stored payload is not a dictionary.")
-            plan = TaskPlan.model_validate(payload)
-        except Exception:
-            answer_callback_query(cq_id, "Invalid task plan data.")
-            send_telegram_message("⚠️ The pending task plan is invalid or corrupted.", chat_id=chat_id)
+            if success:
+                send_telegram_message(f"✅ Email successfully sent to *{payload['to']}*!", chat_id=chat_id)
+            else:
+                send_telegram_message("❌ Failed to send email. Check configuration/logs.", chat_id=chat_id)
             db.delete_pending_action(action_id)
-            return
+            db.delete_pending_action(f"editing_{chat_id}")
 
-        # 4. ONE-SHOT CONSUMPTION: Delete pending action BEFORE execution starts
-        # This prevents duplicate execution if Execute All is clicked twice rapidly.
-        db.delete_pending_action(action_id)
+        elif cmd == "edit":
+            payload = action["payload"]
+            answer_callback_query(cq_id, "Editing draft...")
+            db.save_pending_action(f"editing_{chat_id}", chat_id, "editing", payload, ttl_seconds=300)
+            send_telegram_message("✏️ Reply to this message with your instructions on what to change in the draft.", chat_id=chat_id)
 
-        # 5. Acknowledge callback immediately
-        answer_callback_query(cq_id, "Executing tasks...")
+        elif cmd == "cancel":
+            answer_callback_query(cq_id, "Draft cancelled.")
+            db.delete_pending_action(action_id)
+            db.delete_pending_action(f"editing_{chat_id}")
+            send_telegram_message("❌ Draft cancelled.", chat_id=chat_id)
 
-        # 6. Execute tasks sequentially and send final summary report
-        summary_msg = execute_task_plan(plan, chat_id)
+        elif cmd == "reply_prompt":
+            answer_callback_query(cq_id, "Quick Reply")
+            payload = action["payload"]
+            db.save_pending_action(f"editing_{chat_id}", chat_id, "editing", {
+                "to": payload["sender"],
+                "subject": f"Re: {payload['subject']}",
+                "body": ""
+            }, ttl_seconds=300)
+            send_telegram_message(f"💬 What would you like to reply to *{payload['sender']}*?", chat_id=chat_id)
+
+        elif cmd == "dismiss":
+            answer_callback_query(cq_id, "Dismissed.")
+
+        elif cmd == "confirm_del":
+            payload = action["payload"]
+            answer_callback_query(cq_id, "Deleting contact...")
+            db.delete_contact(chat_id, payload["name"])
+            db.scrub_contact_from_history(chat_id, payload["email"])
+            send_telegram_message(f"✅ Successfully removed *{payload['name']}* (`{payload['email']}`) from your contacts!", chat_id=chat_id)
+            db.delete_pending_action(action_id)
+
+        elif cmd == "cancel_del":
+            answer_callback_query(cq_id, "Cancelled.")
+            send_telegram_message("❌ Contact removal cancelled.", chat_id=chat_id)
+            db.delete_pending_action(action_id)
+
+        elif cmd == "confirm_cal":
+            if action.get("action_type") != "confirm_schedule_calendar":
+                answer_callback_query(cq_id, "Invalid action type.")
+                send_telegram_message("⚠️ Invalid action type.", chat_id=chat_id)
+                return
+
+            if str(action.get("chat_id")) != str(chat_id):
+                answer_callback_query(cq_id, "Unauthorized action.")
+                send_telegram_message("⚠️ You do not have permission to confirm this event.", chat_id=chat_id)
+                return
+
+            payload = action.get("payload", {})
+            # Consume pending action BEFORE execution to prevent duplicate execution on rapid double-click
+            db.delete_pending_action(action_id)
+
+            answer_callback_query(cq_id, "Scheduling event...")
+            send_telegram_message("⏳ Creating calendar event...", chat_id=chat_id)
+
+            title = payload.get("title", "")
+            date = payload.get("date", "")
+            start_time = payload.get("start_time", "")
+            duration_minutes = payload.get("duration_minutes", 30)
+            attendees = payload.get("attendees")
+
+            res = create_event(
+                title=title,
+                date=date,
+                start_time=start_time,
+                duration_minutes=duration_minutes,
+                attendees=attendees,
+            )
+            if isinstance(res, dict) and res.get("status") == "success":
+                succ_msg = _format_calendar_success_message(res)
+                send_telegram_message(succ_msg, chat_id=chat_id)
+                db.add_message(chat_id, "assistant", f"Created calendar event '{res.get('title', title)}'.")
+            else:
+                err_msg = res.get("message", "Failed to create calendar event.") if isinstance(res, dict) else "Failed to create calendar event."
+                send_telegram_message(err_msg if err_msg.startswith("⚠️") or err_msg.startswith("Calendar API error") else f"❌ {err_msg}", chat_id=chat_id)
+
+        elif cmd == "cancel_cal":
+            if action.get("action_type") != "confirm_schedule_calendar":
+                answer_callback_query(cq_id, "Invalid action type.")
+                send_telegram_message("⚠️ Invalid action type.", chat_id=chat_id)
+                return
+
+            if str(action.get("chat_id")) != str(chat_id):
+                answer_callback_query(cq_id, "Unauthorized action.")
+                send_telegram_message("⚠️ You do not have permission to cancel this event.", chat_id=chat_id)
+                return
+
+            db.delete_pending_action(action_id)
+            answer_callback_query(cq_id, "Cancelled.")
+            send_telegram_message("❌ *Calendar event cancelled*", chat_id=chat_id)
+
+        # ── Phase 2.7 & 2.8: TaskPlan multi-task execution callbacks ─────────
+        elif cmd == "plan_execute":
+            # 1. Verify action_type
+            if action.get("action_type") != "confirm_taskplan":
+                answer_callback_query(cq_id, "Invalid action type.")
+                send_telegram_message("⚠️ Invalid action type for task plan.", chat_id=chat_id)
+                return
+
+            # 2. Ownership / chat safety check
+            if str(action.get("chat_id")) != str(chat_id):
+                answer_callback_query(cq_id, "Unauthorized action.")
+                send_telegram_message("⚠️ You do not have permission to execute this plan.", chat_id=chat_id)
+                return
+
+            # 3. Reconstruct and validate TaskPlan from stored payload
+            payload = action.get("payload")
+            try:
+                if not isinstance(payload, dict):
+                    raise ValueError("Stored payload is not a dictionary.")
+                plan = TaskPlan.model_validate(payload)
+            except Exception:
+                answer_callback_query(cq_id, "Invalid task plan data.")
+                send_telegram_message("⚠️ The pending task plan is invalid or corrupted.", chat_id=chat_id)
+                db.delete_pending_action(action_id)
+                return
+
+            # 4. ONE-SHOT CONSUMPTION: Delete pending action BEFORE execution starts
+            # This prevents duplicate execution if Execute All is clicked twice rapidly.
+            db.delete_pending_action(action_id)
+
+            # 5. Acknowledge callback immediately
+            answer_callback_query(cq_id, "Executing tasks...")
+
+            # 6. Execute tasks sequentially and send final summary report
+            summary_msg = execute_task_plan(plan, chat_id)
+            try:
+                send_telegram_message(summary_msg, chat_id=chat_id)
+            except Exception as err:
+                print(f"[Telegram Error] Failed to send TaskPlan summary report: {err}")
+
+        elif cmd == "plan_cancel":
+            # 1. Verify action_type
+            if action.get("action_type") != "confirm_taskplan":
+                answer_callback_query(cq_id, "Invalid action type.")
+                send_telegram_message("⚠️ Invalid action type for task plan.", chat_id=chat_id)
+                return
+
+            # 2. Ownership / chat safety check
+            if str(action.get("chat_id")) != str(chat_id):
+                answer_callback_query(cq_id, "Unauthorized action.")
+                send_telegram_message("⚠️ You do not have permission to cancel this plan.", chat_id=chat_id)
+                return
+
+            # 3. Delete action & acknowledge
+            db.delete_pending_action(action_id)
+            answer_callback_query(cq_id, "Plan cancelled.")
+            send_telegram_message("❌ Task plan cancelled.", chat_id=chat_id)
+
+    except Exception as e:
+        print(f"[Telegram Error] Exception in callback query handler: {_sanitize_error_message(e)}")
         try:
-            send_telegram_message(summary_msg, chat_id=chat_id)
-        except Exception as err:
-            print(f"[Telegram Error] Failed to send TaskPlan summary report: {err}")
-
-    elif cmd == "plan_cancel":
-        # 1. Verify action_type
-        if action.get("action_type") != "confirm_taskplan":
-            answer_callback_query(cq_id, "Invalid action type.")
-            send_telegram_message("⚠️ Invalid action type for task plan.", chat_id=chat_id)
-            return
-
-        # 2. Ownership / chat safety check
-        if str(action.get("chat_id")) != str(chat_id):
-            answer_callback_query(cq_id, "Unauthorized action.")
-            send_telegram_message("⚠️ You do not have permission to cancel this plan.", chat_id=chat_id)
-            return
-
-        # 3. Delete action & acknowledge
-        db.delete_pending_action(action_id)
-        answer_callback_query(cq_id, "Plan cancelled.")
-        send_telegram_message("❌ Task plan cancelled.", chat_id=chat_id)
+            if cq_id:
+                answer_callback_query(cq_id, "Error handling callback.")
+            send_telegram_message(_sanitize_error_message(e), chat_id=chat_id)
+        except Exception:
+            pass
 
 
 

@@ -66,13 +66,27 @@ The agent will:
 - Check your emails immediately on startup
 - Check every 10 minutes automatically
 
-## Telegram Commands
+## Telegram Commands & Capabilities
 
-| Command | What it does |
+| Command / Capability | What it does |
 |---|---|
 | `/check` | Manually trigger an email check right now |
 | `/send TO: email@x.com \| SUBJECT: Hello \| BODY: Message here` | Send an email |
-| Any natural text | The AI agent handles it (e.g., "Email John that I'll be late") |
+| Natural language email requests | Schedule or send emails via Telegram confirmation flow |
+| Natural language calendar requests | Schedule events (`schedule_calendar`) or view upcoming events (`list_calendar`) |
+
+### Google Calendar Integration
+
+**Supported Features:**
+- Schedule Calendar events with title, date, start time, duration, and optional attendees via Telegram inline confirmation
+- List upcoming Calendar events for specified datetime ranges
+- Shared Google OAuth authentication mechanism for Gmail and Google Calendar
+
+**Out of Scope / Not Supported:**
+- Calendar event editing or deletion
+- Recurring events
+- Conflict detection
+- Advanced reminders/notifications
 
 ## Customize
 
