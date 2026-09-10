@@ -1,7 +1,7 @@
 # personal-agent/main.py
 import time
 import uuid
-
+import threading
 import os
 from datetime import datetime, timedelta
 from tools.email_reader import fetch_unread_emails
@@ -15,6 +15,9 @@ import config
 
 # Track last processed Telegram update ID
 last_update_id = 0
+
+# Polling interval for background alarm checker
+ALARM_CHECK_INTERVAL_SECONDS = 30
 
 # ──────────────────────────────────────────────
 # TELEGRAM LISTENER & AGENT INTERACTION
@@ -1219,10 +1222,54 @@ def listen_for_telegram_messages():
             handle_callback_query(update["callback_query"])
 
 
+# ──────────────────────────────────────────────
+# BACKGROUND ALARM CHECKER THREAD
+# ──────────────────────────────────────────────
+
+def check_and_fire_due_alarms():
+    """Check SQLite for pending alarms whose fire_at timestamp has arrived and deliver them via Telegram."""
+    try:
+        now_ts = int(time.time())
+        pending_alarms = db.get_pending_alarms()
+        for alarm in pending_alarms:
+            alarm_id = alarm.get("id")
+            chat_id = alarm.get("chat_id")
+            message = alarm.get("message")
+            fire_at = alarm.get("fire_at")
+
+            if fire_at is not None and fire_at <= now_ts:
+                try:
+                    msg = f"⏰ Reminder: {message}"
+                    send_telegram_message(msg, chat_id=chat_id)
+                    db.mark_alarm_fired(alarm_id)
+                except Exception as alarm_err:
+                    print(f"[Alarm Checker Error] Failed to send/mark alarm {alarm_id}: {_sanitize_error_message(alarm_err)}")
+    except Exception as e:
+        print(f"[Alarm Checker Error] Exception during alarm check cycle: {_sanitize_error_message(e)}")
+
+
+def alarm_checker_loop():
+    """Daemon loop that periodically polls and fires due alarms every ALARM_CHECK_INTERVAL_SECONDS."""
+    while True:
+        try:
+            check_and_fire_due_alarms()
+        except Exception as e:
+            print(f"[Alarm Checker Loop Error] Unhandled exception in loop: {_sanitize_error_message(e)}")
+        time.sleep(ALARM_CHECK_INTERVAL_SECONDS)
+
+
 def main():
     print("=" * 50)
     print("  Personal AI Agent Starting (Fast Mode)...")
     print("=" * 50)
+
+    # Start background alarm checker daemon thread
+    alarm_thread = threading.Thread(
+        target=alarm_checker_loop,
+        daemon=True,
+        name="AlarmCheckerThread"
+    )
+    alarm_thread.start()
 
     send_telegram_message(
         "🚀 *Agent is online (Fast Mode)!*\n\n"
