@@ -2,6 +2,7 @@ import re
 import json
 import requests
 from typing import List, Dict, Optional, Union
+from datetime import datetime, timedelta, date, time
 from pydantic import ValidationError
 from tenacity import retry, wait_exponential, stop_after_attempt
 import config
@@ -162,7 +163,137 @@ def resolve_relative_calendar_date(user_message: str, ref_dt: Optional[datetime]
 
     return None
 
-def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dict[str, str]] = None, chat_id: str = None) -> ToolCall:
+def parse_natural_datetime(text: str, reference_datetime: Optional[datetime] = None) -> Optional[str]:
+    """
+    Parse a natural-language datetime expression or relative duration string into
+    a normalized ISO datetime string ('YYYY-MM-DDTHH:MM:SS').
+
+    Supports:
+    - ISO strings directly ('2026-09-11T09:00:00', '2026-09-11 09:00:00', '2026-09-11')
+    - Relative duration offsets ('in 30 minutes', 'in 2 hours', 'in 90 minutes')
+    - Relative date keywords ('today', 'tomorrow', 'Friday', 'this Friday', 'next Friday', weekdays)
+    - 12-hour (9 AM, 9:30 AM, 2:30 PM) and 24-hour (14:30, 18:00) time formats
+    - Rejects invalid times (25:00, 13:90, 15 PM) and unparseable text by returning None.
+    - Preserves timezone of reference_datetime (defaults to local timezone if None).
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    if reference_datetime is None:
+        ref_dt = datetime.now().astimezone()
+    else:
+        ref_dt = reference_datetime
+
+    clean_text = text.strip()
+
+    # 1. Direct ISO datetime format string check
+    try:
+        if len(clean_text) == 10 and clean_text.count("-") == 2:
+            dt_iso = datetime.strptime(clean_text, "%Y-%m-%d")
+            if ref_dt.tzinfo:
+                dt_iso = dt_iso.replace(tzinfo=ref_dt.tzinfo)
+            return dt_iso.strftime("%Y-%m-%dT%H:%M:%S")
+
+        dt_iso = datetime.fromisoformat(clean_text)
+        if dt_iso.tzinfo is None and ref_dt.tzinfo:
+            dt_iso = dt_iso.replace(tzinfo=ref_dt.tzinfo)
+        return dt_iso.strftime("%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        pass
+
+    # 2. Relative Duration Expressions (e.g. "in 30 minutes", "in 2 hours", "in 90 minutes")
+    duration_match = re.search(r"\bin\s+(\d+)\s*(minute|minutes|min|mins|hour|hours|hr|hrs)\b", clean_text, re.IGNORECASE)
+    if duration_match:
+        val = int(duration_match.group(1))
+        unit = duration_match.group(2).lower()
+        if "hour" in unit or "hr" in unit:
+            target_dt = ref_dt + timedelta(hours=val)
+        else:
+            target_dt = ref_dt + timedelta(minutes=val)
+        return target_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # 3. Date Resolution (today, tomorrow, weekday names)
+    msg_lower = clean_text.lower()
+    target_date = None
+
+    if re.search(r"\btomorrow\b", msg_lower):
+        target_date = (ref_dt + timedelta(days=1)).date()
+    elif re.search(r"\btoday\b", msg_lower):
+        target_date = ref_dt.date()
+    else:
+        weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        for idx, day_name in enumerate(weekdays):
+            pattern = r"\b(?:this\s+|next\s+)?" + day_name + r"\b"
+            if re.search(pattern, msg_lower):
+                is_next = bool(re.search(r"\bnext\s+" + day_name + r"\b", msg_lower))
+                today_idx = ref_dt.weekday()
+                if is_next:
+                    days_ahead = (idx - today_idx) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7
+                    else:
+                        days_ahead += 7
+                else:
+                    days_ahead = (idx - today_idx) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7
+                target_date = (ref_dt + timedelta(days=days_ahead)).date()
+                break
+
+    if target_date is None:
+        return None
+
+    # 4. Time Resolution (12-hour with AM/PM vs 24-hour format)
+    hour_24 = None
+    minute_24 = None
+
+    # 4a. 12-hour format (e.g., "9 AM", "9:30 AM", "09:30 am", "2:30 PM", "12 PM")
+    m_12h = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", clean_text, re.IGNORECASE)
+    if m_12h:
+        h_val = int(m_12h.group(1))
+        m_val = int(m_12h.group(2)) if m_12h.group(2) else 0
+        ampm = m_12h.group(3).lower()
+
+        if h_val < 1 or h_val > 12 or m_val < 0 or m_val > 59:
+            return None
+
+        if ampm == "am":
+            hour_24 = 0 if h_val == 12 else h_val
+        else:
+            hour_24 = 12 if h_val == 12 else h_val + 12
+        minute_24 = m_val
+    else:
+        # 4b. 24-hour format (e.g., "14:30", "18:00", "09:00")
+        m_24h = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b(?!\s*(?:am|pm))\b", clean_text, re.IGNORECASE)
+        if m_24h:
+            h_val = int(m_24h.group(1))
+            m_val = int(m_24h.group(2))
+            if h_val < 0 or h_val > 23 or m_val < 0 or m_val > 59:
+                return None
+            hour_24 = h_val
+            minute_24 = m_val
+
+    if hour_24 is None or minute_24 is None:
+        return None
+
+    target_dt = datetime(
+        target_date.year,
+        target_date.month,
+        target_date.day,
+        hour_24,
+        minute_24,
+        0,
+        tzinfo=ref_dt.tzinfo
+    )
+    return target_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+def validate_tool_call(
+    tool_call: ToolCall,
+    user_message: str,
+    history: List[Dict[str, str]] = None,
+    chat_id: str = None,
+    reference_datetime: Optional[datetime] = None,
+) -> ToolCall:
     """
     Code-level validation to prevent model hallucinations.
 
@@ -174,6 +305,7 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
 
     For draft_reply, email_id must appear literally in user_message or history.
     For calendar tools, validate args against their Pydantic schema and enforce relative date accuracy.
+    For set_alarm, deterministically resolve fire_at via parse_natural_datetime and validate via SetAlarmArgs.
     """
     # --- Tier 1: trusted sources only (current message + live contacts) ---
     trusted_text = user_message.lower()
@@ -220,6 +352,27 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
             if hasattr(tool_call, "_was_retried"):
                 overridden._was_retried = tool_call._was_retried
             return overridden
+
+    elif tool_call.tool == "set_alarm":
+        fire_at_val = str(tool_call.args.get("fire_at", "")).strip()
+        parsed_dt = parse_natural_datetime(fire_at_val, reference_datetime=reference_datetime) or parse_natural_datetime(user_message, reference_datetime=reference_datetime)
+        if parsed_dt:
+            tool_call.args["fire_at"] = parsed_dt
+
+        schema = TOOL_ARGS_SCHEMAS.get("set_alarm")
+        if schema:
+            try:
+                schema.model_validate(tool_call.args)
+            except ValidationError as ve:
+                print(f"[Validation] Invalid arguments for set_alarm: {ve}")
+                overridden = ToolCall(
+                    tool="none",
+                    args={"message": "Invalid arguments provided for tool set_alarm."},
+                    reasoning=f"Argument validation failed for set_alarm: {ve}"
+                )
+                if hasattr(tool_call, "_was_retried"):
+                    overridden._was_retried = tool_call._was_retried
+                return overridden
 
     elif tool_call.tool in ("schedule_calendar", "list_calendar"):
         schema = TOOL_ARGS_SCHEMAS.get(tool_call.tool)

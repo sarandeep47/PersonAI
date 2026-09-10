@@ -6,6 +6,7 @@ import re
 import difflib
 import csv
 import os
+import uuid
 from typing import Optional, Dict, Any
 
 DB_PATH = "agent_session.db"
@@ -68,6 +69,16 @@ def init_db():
                 chat_id TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 updated_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alarms (
+                id         TEXT PRIMARY KEY,
+                chat_id    TEXT NOT NULL,
+                message   TEXT NOT NULL,
+                fire_at   REAL NOT NULL,
+                fired      INTEGER DEFAULT 0,
+                created_at REAL NOT NULL
             )
         """)
 
@@ -490,6 +501,100 @@ def export_contacts_csv(chat_id: str) -> Optional[str]:
             writer.writerow([c["name"], c["email"], created_str, last_used_str])
 
     return csv_path
+
+# --- Alarms Persistence ---
+
+def save_alarm(chat_id: str, message: str, fire_at: float, alarm_id: Optional[str] = None, created_at: Optional[float] = None) -> str:
+    """
+    Save a new alarm to SQLite database.
+    Returns the alarm id.
+    """
+    if not alarm_id:
+        alarm_id = str(uuid.uuid4())
+    if created_at is None:
+        created_at = time.time()
+
+    conn = get_db()
+    with conn:
+        conn.execute(
+            "INSERT INTO alarms (id, chat_id, message, fire_at, fired, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+            (alarm_id, str(chat_id), str(message), float(fire_at), float(created_at))
+        )
+    return alarm_id
+
+def get_pending_alarms(chat_id: Optional[str] = None) -> list[dict]:
+    """
+    Retrieve all pending alarms (fired = 0) ordered by fire_at ASC.
+    If chat_id is provided, filters for that chat_id.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    if chat_id is not None:
+        cursor.execute(
+            "SELECT * FROM alarms WHERE fired = 0 AND chat_id = ? ORDER BY fire_at ASC",
+            (str(chat_id),)
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM alarms WHERE fired = 0 ORDER BY fire_at ASC"
+        )
+    rows = cursor.fetchall()
+    return [dict(r) for r in rows]
+
+def mark_alarm_fired(alarm_id: str) -> bool:
+    """
+    Safely mark one alarm as fired (fired = 1).
+    Returns True if an alarm row was updated, False otherwise.
+    """
+    conn = get_db()
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE alarms SET fired = 1 WHERE id = ?",
+            (str(alarm_id),)
+        )
+        return cursor.rowcount > 0
+
+def list_alarms(chat_id: str, include_fired: bool = False) -> list[dict]:
+    """
+    List alarms for a chat_id ordered by fire_at ASC.
+    By default returns pending alarms only unless include_fired is True.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    if include_fired:
+        cursor.execute(
+            "SELECT * FROM alarms WHERE chat_id = ? ORDER BY fire_at ASC",
+            (str(chat_id),)
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM alarms WHERE chat_id = ? AND fired = 0 ORDER BY fire_at ASC",
+            (str(chat_id),)
+        )
+    rows = cursor.fetchall()
+    return [dict(r) for r in rows]
+
+def delete_alarm(alarm_id: str, chat_id: Optional[str] = None) -> bool:
+    """
+    Safely delete one alarm by id.
+    If chat_id is provided, also checks that chat_id matches.
+    Returns True if an alarm was deleted, False otherwise.
+    """
+    conn = get_db()
+    with conn:
+        cursor = conn.cursor()
+        if chat_id is not None:
+            cursor.execute(
+                "DELETE FROM alarms WHERE id = ? AND chat_id = ?",
+                (str(alarm_id), str(chat_id))
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM alarms WHERE id = ?",
+                (str(alarm_id),)
+            )
+        return cursor.rowcount > 0
 
 # Initialize DB on import
 init_db()

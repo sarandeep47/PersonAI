@@ -101,6 +101,49 @@ class ListCalendarArgs(BaseModel):
             raise ValueError(f"Invalid ISO datetime string: '{clean}'")
         return clean
 
+class SetAlarmArgs(BaseModel):
+    message: str = Field(..., description="Alarm or reminder message text")
+    fire_at: str = Field(..., description="ISO format datetime string when the alarm should fire")
+    offset_minutes: Optional[int] = Field(default=None, description="Optional offset in minutes relative to reference_time or event")
+    reference_time: Optional[str] = Field(default=None, description="Optional ISO format reference datetime string")
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Message must not be empty.")
+        return v.strip()
+
+    @field_validator("fire_at")
+    @classmethod
+    def validate_fire_at(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("fire_at must not be empty.")
+        clean = v.strip()
+        try:
+            if len(clean) == 10:
+                datetime.strptime(clean, "%Y-%m-%d")
+            else:
+                datetime.fromisoformat(clean)
+        except ValueError:
+            raise ValueError(f"Invalid ISO datetime string: '{clean}'")
+        return clean
+
+    @field_validator("reference_time")
+    @classmethod
+    def validate_reference_time(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        clean = v.strip()
+        try:
+            if len(clean) == 10:
+                datetime.strptime(clean, "%Y-%m-%d")
+            else:
+                datetime.fromisoformat(clean)
+        except ValueError:
+            raise ValueError(f"Invalid ISO datetime string: '{clean}'")
+        return clean
+
 ToolName = Literal[
     "send_email",
     "search_inbox",
@@ -111,6 +154,7 @@ ToolName = Literal[
     "rename_contact",
     "schedule_calendar",
     "list_calendar",
+    "set_alarm",
     "none",
 ]
 
@@ -133,6 +177,8 @@ TOOL_ARGS_SCHEMAS: Dict[str, type[BaseModel]] = {
     "rename_contact": RenameContactArgs,
     "schedule_calendar": ScheduleCalendarArgs,
     "list_calendar": ListCalendarArgs,
+    "set_alarm": SetAlarmArgs,
     "none": NoneArgs,
 }
+
 

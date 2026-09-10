@@ -115,6 +115,10 @@ def handle_message(chat_id: str, text: str, attachment_path: str = None):
             args = tool_call.args
             _present_calendar_confirmation(chat_id, args)
 
+        elif tool_call.tool == "set_alarm":
+            args = tool_call.args
+            _present_alarm_confirmation(chat_id, args)
+
         elif tool_call.tool == "list_calendar":
             send_telegram_message("📅 Checking your calendar...", chat_id=chat_id)
             success, output_msg = execute_single_tool_call(tool_call, chat_id)
@@ -406,6 +410,69 @@ def _present_calendar_confirmation(chat_id: str, args: dict):
     db.add_message(chat_id, "assistant", assistant_summary)
 
 
+def _format_alarm_datetime(fire_at_iso: str) -> tuple[str, str]:
+    """
+    Format ISO datetime string for Telegram alarm confirmation UX.
+    Returns (formatted_date, formatted_time).
+    """
+    try:
+        if len(fire_at_iso) == 10 and fire_at_iso.count("-") == 2:
+            dt = datetime.strptime(fire_at_iso, "%Y-%m-%d")
+        else:
+            dt = datetime.fromisoformat(fire_at_iso)
+
+        formatted_date = dt.strftime("%A, %B ") + str(dt.day) + dt.strftime(", %Y")
+        formatted_time = dt.strftime("%I:%M %p").lstrip("0")
+        return formatted_date, formatted_time
+    except Exception:
+        return fire_at_iso, ""
+
+
+def _present_alarm_confirmation(chat_id: str, args: dict):
+    """Present reminder/alarm creation with inline confirmation buttons."""
+    message = str(args.get("message", "")).strip()
+    fire_at = str(args.get("fire_at", "")).strip()
+    offset_minutes = args.get("offset_minutes")
+    reference_time = args.get("reference_time")
+
+    if not message or not fire_at:
+        msg = "⚠️ Please specify message and time for the reminder."
+        send_telegram_message(msg, chat_id=chat_id)
+        db.add_message(chat_id, "assistant", msg)
+        return
+
+    action_id = f"alarm_{uuid.uuid4().hex[:8]}"
+    db.save_pending_action(action_id, chat_id, "confirm_set_alarm", {
+        "message": message,
+        "fire_at": fire_at,
+        "offset_minutes": offset_minutes,
+        "reference_time": reference_time,
+    })
+
+    formatted_date, formatted_time = _format_alarm_datetime(fire_at)
+    time_display = f"\n🕘 {formatted_time}" if formatted_time else ""
+
+    msg = (
+        f"⏰ *Reminder*\n\n"
+        f"{message}\n\n"
+        f"📅 {formatted_date}"
+        f"{time_display}"
+    )
+
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Confirm", "callback_data": f"confirm_alarm:{action_id}"},
+                {"text": "❌ Cancel", "callback_data": f"cancel_alarm:{action_id}"}
+            ]
+        ]
+    }
+    send_telegram_message(msg, reply_markup=reply_markup, chat_id=chat_id)
+
+    assistant_summary = f"Asked for confirmation to set reminder '{message}' for {formatted_date}{' at ' + formatted_time if formatted_time else ''}."
+    db.add_message(chat_id, "assistant", assistant_summary)
+
+
 # ──────────────────────────────────────────────
 # TASK PLAN CONFIRMATION UI  (Phase 2.5)
 # ──────────────────────────────────────────────
@@ -421,6 +488,7 @@ _TOOL_DISPLAY_NAMES = {
     "rename_contact":    "Rename contact",
     "schedule_calendar": "Schedule calendar event",
     "list_calendar":     "List calendar events",
+    "set_alarm":         "Set reminder",
     "none":              "No action",
 }
 
@@ -739,6 +807,32 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
 
             return True, "\n\n".join(lines)
 
+        elif tool_name == "set_alarm":
+            message = str(args.get("message", "")).strip()
+            fire_at_iso = str(args.get("fire_at", "")).strip()
+            if not message or not fire_at_iso:
+                return False, "Message and fire_at required for set_alarm."
+
+            try:
+                if len(fire_at_iso) == 10 and fire_at_iso.count("-") == 2:
+                    dt_obj = datetime.strptime(fire_at_iso, "%Y-%m-%d")
+                else:
+                    dt_obj = datetime.fromisoformat(fire_at_iso)
+                fire_at_ts = dt_obj.timestamp()
+
+                alarm_id = db.save_alarm(chat_id=chat_id, message=message, fire_at=fire_at_ts)
+                formatted_date, formatted_time = _format_alarm_datetime(fire_at_iso)
+                time_display = f"\n🕘 {formatted_time}" if formatted_time else ""
+                succ_msg = (
+                    f"✅ *Reminder set!*\n\n"
+                    f"⏰ {message}\n"
+                    f"📅 {formatted_date}"
+                    f"{time_display}"
+                )
+                return True, succ_msg
+            except Exception as e:
+                return False, _sanitize_error_message(e)
+
         elif tool_name == "none":
             msg = str(args.get("message", "No action executed.")).strip()
             return True, msg
@@ -943,6 +1037,74 @@ def handle_callback_query(cq: dict):
             db.delete_pending_action(action_id)
             answer_callback_query(cq_id, "Cancelled.")
             send_telegram_message("❌ *Calendar event cancelled*", chat_id=chat_id)
+
+        elif cmd == "confirm_alarm":
+            if not action:
+                answer_callback_query(cq_id, "Action expired or unavailable.")
+                send_telegram_message("⚠️ This action is no longer available or has already been processed.", chat_id=chat_id)
+                return
+
+            if action.get("action_type") != "confirm_set_alarm":
+                answer_callback_query(cq_id, "Invalid action type.")
+                send_telegram_message("⚠️ Invalid action type.", chat_id=chat_id)
+                return
+
+            if str(action.get("chat_id")) != str(chat_id):
+                answer_callback_query(cq_id, "Unauthorized action.")
+                send_telegram_message("⚠️ You do not have permission to confirm this reminder.", chat_id=chat_id)
+                return
+
+            payload = action.get("payload", {})
+            db.delete_pending_action(action_id)
+
+            message = payload.get("message", "")
+            fire_at_iso = payload.get("fire_at", "")
+
+            try:
+                if len(fire_at_iso) == 10 and fire_at_iso.count("-") == 2:
+                    dt_obj = datetime.strptime(fire_at_iso, "%Y-%m-%d")
+                else:
+                    dt_obj = datetime.fromisoformat(fire_at_iso)
+                fire_at_ts = dt_obj.timestamp()
+
+                alarm_id = db.save_alarm(chat_id=chat_id, message=message, fire_at=fire_at_ts)
+
+                answer_callback_query(cq_id, "Reminder set!")
+                formatted_date, formatted_time = _format_alarm_datetime(fire_at_iso)
+                time_display = f"\n🕘 {formatted_time}" if formatted_time else ""
+                succ_msg = (
+                    f"✅ *Reminder set!*\n\n"
+                    f"⏰ {message}\n"
+                    f"📅 {formatted_date}"
+                    f"{time_display}"
+                )
+                send_telegram_message(succ_msg, chat_id=chat_id)
+                db.add_message(chat_id, "assistant", f"Set reminder '{message}'.")
+
+            except Exception as e:
+                print(f"[Alarm] Error saving alarm: {e}")
+                answer_callback_query(cq_id, "Failed to set reminder.")
+                send_telegram_message("⚠️ Sorry, something went wrong setting the reminder.", chat_id=chat_id)
+
+        elif cmd == "cancel_alarm":
+            if not action:
+                answer_callback_query(cq_id, "Action expired or unavailable.")
+                send_telegram_message("⚠️ This action is no longer available or has already been processed.", chat_id=chat_id)
+                return
+
+            if action.get("action_type") != "confirm_set_alarm":
+                answer_callback_query(cq_id, "Invalid action type.")
+                send_telegram_message("⚠️ Invalid action type.", chat_id=chat_id)
+                return
+
+            if str(action.get("chat_id")) != str(chat_id):
+                answer_callback_query(cq_id, "Unauthorized action.")
+                send_telegram_message("⚠️ You do not have permission to cancel this reminder.", chat_id=chat_id)
+                return
+
+            db.delete_pending_action(action_id)
+            answer_callback_query(cq_id, "Cancelled.")
+            send_telegram_message("❌ *Reminder cancelled.*", chat_id=chat_id)
 
         # ── Phase 2.7 & 2.8: TaskPlan multi-task execution callbacks ─────────
         elif cmd == "plan_execute":
