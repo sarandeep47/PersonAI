@@ -123,6 +123,45 @@ def _placeholder_fallback() -> ToolCall:
         reasoning="Generated email subject or body contained an unfilled bracketed placeholder."
     )
 
+def resolve_relative_calendar_date(user_message: str, ref_dt: Optional[datetime] = None) -> Optional[str]:
+    """
+    Parse relative date references in user_message (e.g. 'Friday', 'tomorrow', 'today', 'next Friday')
+    and return the calculated YYYY-MM-DD date string relative to ref_dt (defaults to now).
+    """
+    from datetime import datetime, timedelta
+    if ref_dt is None:
+        ref_dt = datetime.now().astimezone()
+    msg = user_message.lower()
+
+    if re.search(r"\btomorrow\b", msg):
+        return (ref_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if re.search(r"\btoday\b", msg):
+        return ref_dt.strftime("%Y-%m-%d")
+
+    weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    for idx, day_name in enumerate(weekdays):
+        pattern = r"\b(?:this\s+|next\s+)?" + day_name + r"\b"
+        if re.search(pattern, msg):
+            is_next = bool(re.search(r"\bnext\s+" + day_name + r"\b", msg))
+            today_idx = ref_dt.weekday()
+
+            if is_next:
+                days_ahead = (idx - today_idx) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                else:
+                    days_ahead += 7
+            else:
+                days_ahead = (idx - today_idx) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+
+            target = ref_dt + timedelta(days=days_ahead)
+            return target.strftime("%Y-%m-%d")
+
+    return None
+
 def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dict[str, str]] = None, chat_id: str = None) -> ToolCall:
     """
     Code-level validation to prevent model hallucinations.
@@ -134,7 +173,7 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
       it may contain emails of contacts that have since been deleted.
 
     For draft_reply, email_id must appear literally in user_message or history.
-    For calendar tools, validate args against their Pydantic schema.
+    For calendar tools, validate args against their Pydantic schema and enforce relative date accuracy.
     """
     # --- Tier 1: trusted sources only (current message + live contacts) ---
     trusted_text = user_message.lower()
@@ -197,6 +236,45 @@ def validate_tool_call(tool_call: ToolCall, user_message: str, history: List[Dic
                 if hasattr(tool_call, "_was_retried"):
                     overridden._was_retried = tool_call._was_retried
                 return overridden
+
+        from datetime import datetime
+        if tool_call.tool == "schedule_calendar":
+            date_val = str(tool_call.args.get("date", "")).strip()
+            if date_val:
+                try:
+                    dt_obj = datetime.strptime(date_val, "%Y-%m-%d")
+                    gen_weekday = dt_obj.strftime("%A").lower()
+
+                    resolved_date = resolve_relative_calendar_date(user_message)
+                    if resolved_date and resolved_date != date_val:
+                        res_dt = datetime.strptime(resolved_date, "%Y-%m-%d")
+                        res_weekday = res_dt.strftime("%A").lower()
+
+                        if gen_weekday != res_weekday:
+                            print(
+                                f"[Validation] Correcting calendar date from '{date_val}' ({gen_weekday}) "
+                                f"to '{resolved_date}' ({res_weekday}) based on user input."
+                            )
+                            tool_call.args["date"] = resolved_date
+                except ValueError:
+                    pass
+
+        elif tool_call.tool == "list_calendar":
+            resolved_date = resolve_relative_calendar_date(user_message)
+            if resolved_date:
+                start_dt = str(tool_call.args.get("start_datetime", "")).strip()
+                if start_dt and len(start_dt) >= 10:
+                    curr_start_date = start_dt[:10]
+                    try:
+                        dt_obj = datetime.strptime(curr_start_date, "%Y-%m-%d")
+                        gen_weekday = dt_obj.strftime("%A").lower()
+                        res_dt = datetime.strptime(resolved_date, "%Y-%m-%d")
+                        res_weekday = res_dt.strftime("%A").lower()
+                        if gen_weekday != res_weekday:
+                            tool_call.args["start_datetime"] = f"{resolved_date}T00:00:00"
+                            tool_call.args["end_datetime"] = f"{resolved_date}T23:59:59"
+                    except ValueError:
+                        pass
 
     return tool_call
 

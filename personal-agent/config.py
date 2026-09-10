@@ -10,6 +10,7 @@ SMTP_PORT = 587
 
 GOOGLE_CREDENTIALS_FILE = "credentials.json"
 GOOGLE_TOKEN_FILE = "token.json"
+GOOGLE_AUTH_PORT = 8080
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",

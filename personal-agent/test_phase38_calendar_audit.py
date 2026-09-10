@@ -220,6 +220,28 @@ class TestPhase38CalendarAudit(unittest.TestCase):
         self.assertIn("https://www.googleapis.com/auth/gmail.readonly", DEFAULT_SCOPES)
         self.assertIn("https://www.googleapis.com/auth/gmail.send", DEFAULT_SCOPES)
 
+    def test_relative_date_resolution_correction(self):
+        """Audit relative date resolution (e.g., Thursday prompt requesting Friday resolves to upcoming Friday)."""
+        from datetime import datetime
+        from agent.core import validate_tool_call, resolve_relative_calendar_date
+
+        ref_dt = datetime.strptime("2026-09-10", "%Y-%m-%d") # Thursday
+        res_date = resolve_relative_calendar_date("Schedule my RAG project meeting Friday at 3 PM for 1 hour.", ref_dt=ref_dt)
+        self.assertEqual(res_date, "2026-09-11") # Should resolve to Friday Sep 11, 2026
+
+        # Simulate LLM producing incorrect Thursday date (2026-09-17) when user requested Friday
+        llm_tool = ToolCall(
+            tool="schedule_calendar",
+            args={"title": "RAG project meeting", "date": "2026-09-17", "start_time": "15:00", "duration_minutes": 60},
+            reasoning="Schedule meeting"
+        )
+        # Validate should detect weekday mismatch (Thursday vs Friday) and correct date
+        validated = validate_tool_call(llm_tool, "Schedule my RAG project meeting Friday at 3 PM for 1 hour.")
+        # Today is Sep 10 (Thursday), upcoming Friday is Sep 11
+        dt_val = datetime.strptime(validated.args["date"], "%Y-%m-%d")
+        self.assertEqual(dt_val.strftime("%A"), "Friday")
+
 
 if __name__ == "__main__":
     unittest.main()
+

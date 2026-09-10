@@ -110,6 +110,35 @@ class TestPhase31CalendarAuth(unittest.TestCase):
             if os.path.exists(tmp_tok_path):
                 os.remove(tmp_tok_path)
 
+    @patch("google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file")
+    def test_oauth_client_flow_initialization(self, mock_from_file):
+        """6. OAuth flow initializes using client secrets file with combined scopes."""
+        mock_flow = MagicMock()
+        mock_flow.run_local_server.return_value = self.mock_creds
+        mock_from_file.return_value = mock_flow
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_cred:
+            tmp_cred.write(b'{"web": {"client_id": "test_id", "client_secret": "test_sec"}}')
+            tmp_cred_path = tmp_cred.name
+
+        non_existent_token = "tmp_non_existent_token_99.json"
+
+        try:
+            creds = get_google_credentials(
+                credentials_file=tmp_cred_path,
+                token_file=non_existent_token,
+            )
+
+            mock_from_file.assert_called_once_with(tmp_cred_path, DEFAULT_SCOPES)
+            mock_flow.run_local_server.assert_called_once_with(port=8080)
+            self.assertEqual(creds, self.mock_creds)
+        finally:
+            if os.path.exists(tmp_cred_path):
+                os.remove(tmp_cred_path)
+            if os.path.exists(non_existent_token):
+                os.remove(non_existent_token)
+
 
 if __name__ == "__main__":
     unittest.main()
+

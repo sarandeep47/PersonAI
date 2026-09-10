@@ -7,6 +7,10 @@ __pycache__/
 .env
 venv/
 ENV/
+credentials.json
+token.json
+token_backup.json
+
 
 # Database and runtime logs
 *.db

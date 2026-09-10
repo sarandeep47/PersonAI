@@ -73,7 +73,12 @@ def get_google_credentials(
                 )
             try:
                 flow = InstalledAppFlow.from_client_secrets_file(cred_path, target_scopes)
-                creds = flow.run_local_server(port=0)
+                port = getattr(config, "GOOGLE_AUTH_PORT", 8080)
+                try:
+                    creds = flow.run_local_server(port=port)
+                except OSError:
+                    logger.warning("Port %s in use, falling back to dynamic port.", port)
+                    creds = flow.run_local_server(port=0)
             except Exception as e:
                 raise RuntimeError(_sanitize_auth_error(e)) from e
 
