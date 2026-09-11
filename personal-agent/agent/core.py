@@ -170,10 +170,10 @@ def parse_natural_datetime(text: str, reference_datetime: Optional[datetime] = N
 
     Supports:
     - ISO strings directly ('2026-09-11T09:00:00', '2026-09-11 09:00:00', '2026-09-11')
-    - Relative duration offsets ('in 30 minutes', 'in 2 hours', 'in 90 minutes')
+    - Relative duration offsets ('in 30 minutes', 'in 2 hours', 'in 90 minutes', '1 min')
     - Relative date keywords ('today', 'tomorrow', 'Friday', 'this Friday', 'next Friday', weekdays)
-    - 12-hour (9 AM, 9:30 AM, 2:30 PM) and 24-hour (14:30, 18:00) time formats
-    - Rejects invalid times (25:00, 13:90, 15 PM) and unparseable text by returning None.
+    - 12-hour (9 AM, 9:30 AM, 2:30 PM) and 24-hour (14:30, 18:00, 19:40, 19:40 pm) time formats
+    - Rejects invalid times (25:00, 13:90) and unparseable text by returning None.
     - Preserves timezone of reference_datetime (defaults to local timezone if None).
     """
     if not text or not isinstance(text, str):
@@ -201,8 +201,8 @@ def parse_natural_datetime(text: str, reference_datetime: Optional[datetime] = N
     except ValueError:
         pass
 
-    # 2. Relative Duration Expressions (e.g. "in 30 minutes", "in 2 hours", "in 90 minutes")
-    duration_match = re.search(r"\bin\s+(\d+)\s*(minute|minutes|min|mins|hour|hours|hr|hrs)\b", clean_text, re.IGNORECASE)
+    # 2. Relative Duration Expressions (e.g. "in 30 minutes", "in 2 hours", "in 90 minutes", "1 min")
+    duration_match = re.search(r"\b(?:in\s+)?(\d+)\s*(minute|minutes|min|mins|hour|hours|hr|hrs)\b", clean_text, re.IGNORECASE)
     if duration_match:
         val = int(duration_match.group(1))
         unit = duration_match.group(2).lower()
@@ -215,11 +215,14 @@ def parse_natural_datetime(text: str, reference_datetime: Optional[datetime] = N
     # 3. Date Resolution (today, tomorrow, weekday names)
     msg_lower = clean_text.lower()
     target_date = None
+    explicit_date = False
 
     if re.search(r"\btomorrow\b", msg_lower):
         target_date = (ref_dt + timedelta(days=1)).date()
+        explicit_date = True
     elif re.search(r"\btoday\b", msg_lower):
         target_date = ref_dt.date()
+        explicit_date = True
     else:
         weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         for idx, day_name in enumerate(weekdays):
@@ -238,40 +241,48 @@ def parse_natural_datetime(text: str, reference_datetime: Optional[datetime] = N
                     if days_ahead == 0:
                         days_ahead = 7
                 target_date = (ref_dt + timedelta(days=days_ahead)).date()
+                explicit_date = True
                 break
 
     if target_date is None:
-        return None
+        target_date = ref_dt.date()
 
     # 4. Time Resolution (12-hour with AM/PM vs 24-hour format)
     hour_24 = None
     minute_24 = None
 
-    # 4a. 12-hour format (e.g., "9 AM", "9:30 AM", "09:30 am", "2:30 PM", "12 PM")
-    m_12h = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", clean_text, re.IGNORECASE)
-    if m_12h:
-        h_val = int(m_12h.group(1))
-        m_val = int(m_12h.group(2)) if m_12h.group(2) else 0
-        ampm = m_12h.group(3).lower()
+    # 4a. Time with minutes: e.g., "19:40", "19:40 pm", "9:30 AM", "14:30"
+    m_time = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?\b", clean_text, re.IGNORECASE)
+    if m_time:
+        h_val = int(m_time.group(1))
+        m_val = int(m_time.group(2))
+        ampm = m_time.group(4).lower() if m_time.group(4) else None
 
-        if h_val < 1 or h_val > 12 or m_val < 0 or m_val > 59:
+        if h_val < 0 or h_val > 23 or m_val < 0 or m_val > 59:
             return None
 
-        if ampm == "am":
-            hour_24 = 0 if h_val == 12 else h_val
+        if h_val > 12:
+            hour_24 = h_val
+        elif ampm:
+            if h_val == 12:
+                hour_24 = 0 if ampm == "am" else 12
+            else:
+                hour_24 = h_val if ampm == "am" else h_val + 12
         else:
-            hour_24 = 12 if h_val == 12 else h_val + 12
+            hour_24 = h_val
         minute_24 = m_val
     else:
-        # 4b. 24-hour format (e.g., "14:30", "18:00", "09:00")
-        m_24h = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b(?!\s*(?:am|pm))\b", clean_text, re.IGNORECASE)
-        if m_24h:
-            h_val = int(m_24h.group(1))
-            m_val = int(m_24h.group(2))
-            if h_val < 0 or h_val > 23 or m_val < 0 or m_val > 59:
-                return None
-            hour_24 = h_val
-            minute_24 = m_val
+        # 4b. Bare hour with AM/PM: e.g. "9 AM", "9 PM", "12 AM"
+        m_ampm_bare = re.search(r"\b(\d{1,2})\s*(am|pm)\b", clean_text, re.IGNORECASE)
+        if m_ampm_bare:
+            h_val = int(m_ampm_bare.group(1))
+            ampm = m_ampm_bare.group(2).lower()
+            if 1 <= h_val <= 12:
+                if h_val == 12:
+                    hour_24 = 0 if ampm == "am" else 12
+                else:
+                    hour_24 = h_val if ampm == "am" else h_val + 12
+                minute_24 = 0
 
     if hour_24 is None or minute_24 is None:
         return None
@@ -285,6 +296,10 @@ def parse_natural_datetime(text: str, reference_datetime: Optional[datetime] = N
         0,
         tzinfo=ref_dt.tzinfo
     )
+
+    if not explicit_date and target_dt < ref_dt - timedelta(minutes=1):
+        target_dt = target_dt + timedelta(days=1)
+
     return target_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 def parse_calendar_relative_intent(text: str) -> Optional[Dict[str, Any]]:
@@ -540,6 +555,15 @@ def validate_tool_call(
             parsed_dt = parse_natural_datetime(fire_at_val, reference_datetime=reference_datetime) or parse_natural_datetime(user_message, reference_datetime=reference_datetime)
             if parsed_dt:
                 tool_call.args["fire_at"] = parsed_dt
+
+            if "message" not in tool_call.args:
+                tool_call.args["message"] = extract_reminder_message(user_message)
+            else:
+                curr_msg = str(tool_call.args.get("message", ""))
+                if curr_msg.strip() and curr_msg.strip().lower() in ["reminder", "remainder", "alarm", "set_alarm"]:
+                    ext = extract_reminder_message(user_message)
+                    if ext != "Reminder":
+                        tool_call.args["message"] = ext
 
         schema = TOOL_ARGS_SCHEMAS.get("set_alarm")
         if schema:
@@ -846,11 +870,11 @@ def call_agent(
         res.args["body"] = _clean_email_body(res.args["body"], sender_name=sender_name)
 
     if isinstance(res, ToolCall):
-        res = _post_process_contact_intent(res, user_message)
+        res = _post_process_contact_intent(res, user_message, reference_datetime=reference_datetime)
 
     return res
 
-def _post_process_contact_intent(tool_call: ToolCall, user_message: str) -> ToolCall:
+def _post_process_contact_intent(tool_call: ToolCall, user_message: str, reference_datetime: Optional[datetime] = None) -> ToolCall:
     """Safeguard to ensure database export and contact deletion intents are always correctly routed."""
     if not tool_call:
         return tool_call
@@ -916,6 +940,19 @@ def _post_process_contact_intent(tool_call: ToolCall, user_message: str) -> Tool
                         args={"query": query_str, "new_name": new_name_str},
                         reasoning=f"User requested renaming contact '{query_str}' to '{new_name_str}'."
                     )
+
+    # 4. Reminder / Alarm intent safeguard (handles typos like 'remainder' and time expressions like '19:40 pm')
+    reminder_triggers = ["remind", "reminder", "remainder", "alarm"]
+    if any(trig in msg_lower for trig in reminder_triggers):
+        if tool_call.tool != "set_alarm":
+            parsed_dt = parse_natural_datetime(user_message, reference_datetime=reference_datetime)
+            if parsed_dt:
+                rem_msg = extract_reminder_message(user_message)
+                return ToolCall(
+                    tool="set_alarm",
+                    args={"message": rem_msg, "fire_at": parsed_dt},
+                    reasoning="Safeguard: User requested setting a reminder/alarm."
+                )
 
     return tool_call
 
@@ -1097,6 +1134,87 @@ def revise_draft(original_draft: dict, user_feedback: str, chat_id: Optional[str
     if res and res.tool == "send_email":
         if not res.args.get("to"):
             res.args["to"] = original_draft.get("to", "")
+
+    return res
+
+def extract_reminder_message(user_message: str) -> str:
+    """
+    Extract clean task message content from a user reminder request.
+    Handles phrasing structures such as:
+      - 'call bob at 20:10 remainder message' -> 'Call bob'
+      - 'remind me at 8 PM to call bob' -> 'Call bob'
+      - 'can u set a remainder in 1 min' -> 'Reminder'
+      - 'set remainder for 19:40 pm' -> 'Reminder'
+      - 'check deployment in 15 mins alarm' -> 'Check deployment'
+    """
+    if not user_message or not isinstance(user_message, str):
+        return "Reminder"
+
+    clean = user_message.strip()
+
+    # 1. First check if explicit 'to <task>' clause exists
+    m_to = re.search(r"\bto\s+([A-Za-z0-9_.\-\s]{2,80})$", clean, re.IGNORECASE)
+    if m_to and m_to.group(1).strip():
+        cand = m_to.group(1).strip()
+        cand = re.sub(r"\s*(?:remainder|reminder|alarm|message)\s*$", "", cand, flags=re.IGNORECASE).strip()
+        if cand and cand.lower() not in ["reminder", "remainder", "alarm", "message"]:
+            return cand.capitalize()
+
+    # 2. Strip conversational request prefixes ("can u", "could you", "please", etc.)
+    clean = re.sub(r"^\s*(?:can\s+u|can\s+you|could\s+you|please|would\s+you|i\s+want\s+to|help\s+me)\s+", "", clean, flags=re.IGNORECASE).strip()
+
+    # 3. Strip ISO and time expressions
+    clean = re.sub(r"\b\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(?::\d{2})?)?\b", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\b(?:for|at)?\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\b(?:for|at)?\s*\d{1,2}\s*(?:am|pm)\b", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\b(?:in\s+)?\d+\s*(?:minutes?|mins?|hours?|hrs?)\b", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\b(?:today|tomorrow|this\s+\w+|next\s+\w+|\w+day)\b", "", clean, flags=re.IGNORECASE)
+
+    # 4. Strip trigger phrases & keywords
+    clean = re.sub(
+        r"\b(?:remind\s+me\s+to|remind\s+me|set\s+a?\s*(?:reminder|remainder|alarm)\s+to|set\s+a?\s*(?:reminder|remainder|alarm)|remainder\s+message|reminder\s+message|reminder|remainder|alarm|message)\b",
+        "",
+        clean,
+        flags=re.IGNORECASE
+    )
+
+    # 5. Strip noise prepositions & tokens
+    clean = re.sub(r"\b(?:to|for|at|in|me|a|an|the|my|message|can|u|you)\b", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    if not clean or clean.lower() in ["reminder", "remainder", "alarm", "message", "a reminder", "a remainder"]:
+        return "Reminder"
+
+    return clean.capitalize()
+
+def revise_alarm(original_alarm: dict, user_feedback: str, reference_datetime: Optional[datetime] = None) -> dict:
+    """
+    Revise an existing pending alarm based on user feedback.
+    Handles instructions like:
+      - 'call Bob' (change message)
+      - 'at 8:30 PM' (change time)
+      - 'tomorrow at 9 AM to call Priya' (change time & message)
+    """
+    res = dict(original_alarm)
+    fb = user_feedback.strip()
+
+    # 1. Datetime update check
+    new_dt = parse_natural_datetime(fb, reference_datetime=reference_datetime)
+    if new_dt:
+        res["fire_at"] = new_dt
+
+    # 2. Message / task update check
+    clean_msg = extract_reminder_message(fb)
+    if clean_msg != "Reminder":
+        res["message"] = clean_msg
+    else:
+        m_msg = re.sub(r"^\b(?:change|update|set|make\s+it)\s+(?:the\s+)?(?:task|message|reminder|name)\s+(?:to\s+)?", "", fb, flags=re.IGNORECASE).strip()
+        m_msg = re.sub(r"\b(?:for|at|in)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b", "", m_msg, flags=re.IGNORECASE).strip()
+        m_msg = re.sub(r"\s+", " ", m_msg).strip()
+        if m_msg and m_msg.lower() not in ["reminder", "remainder", "alarm", "message", "time"]:
+            res["message"] = m_msg.capitalize()
+
+    return res
 
     if res and res.tool == "send_email" and "body" in res.args:
         res.args["body"] = _clean_email_body(res.args["body"], sender_name=sender_name)

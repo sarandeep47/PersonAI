@@ -155,6 +155,7 @@ ToolName = Literal[
     "schedule_calendar",
     "list_calendar",
     "set_alarm",
+    "set_reminder",
     "none",
 ]
 
@@ -162,6 +163,15 @@ class ToolCall(BaseModel):
     tool: ToolName
     args: Dict[str, Any] = Field(default_factory=dict)
     reasoning: str = Field(default="No reasoning provided.", description="One sentence explaining why this tool was chosen")
+
+    @field_validator("tool", mode="before")
+    @classmethod
+    def normalize_tool_name(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v_clean = v.strip().lower()
+            if v_clean in ("set_reminder", "reminder", "alarm", "set_alarm"):
+                return "set_alarm"
+        return v
 
 class TaskPlan(BaseModel):
     tasks: List[ToolCall]
@@ -178,6 +188,7 @@ TOOL_ARGS_SCHEMAS: Dict[str, type[BaseModel]] = {
     "schedule_calendar": ScheduleCalendarArgs,
     "list_calendar": ListCalendarArgs,
     "set_alarm": SetAlarmArgs,
+    "set_reminder": SetAlarmArgs,
     "none": NoneArgs,
 }
 

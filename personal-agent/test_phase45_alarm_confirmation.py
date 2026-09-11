@@ -77,11 +77,13 @@ class TestPhase45AlarmConfirmation(unittest.TestCase):
 
         reply_markup = mock_send.call_args[1].get("reply_markup") or mock_send.call_args[0][1]
         buttons = reply_markup["inline_keyboard"][0]
-        self.assertEqual(len(buttons), 2)
+        self.assertEqual(len(buttons), 3)
         self.assertIn("Confirm", buttons[0]["text"])
         self.assertIn("confirm_alarm:", buttons[0]["callback_data"])
-        self.assertIn("Cancel", buttons[1]["text"])
-        self.assertIn("cancel_alarm:", buttons[1]["callback_data"])
+        self.assertIn("Edit", buttons[1]["text"])
+        self.assertIn("edit_alarm:", buttons[1]["callback_data"])
+        self.assertIn("Cancel", buttons[2]["text"])
+        self.assertIn("cancel_alarm:", buttons[2]["callback_data"])
 
     # --- Confirm Tests (6 to 10) ---
 

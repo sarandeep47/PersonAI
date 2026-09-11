@@ -67,6 +67,20 @@ def handle_message(chat_id: str, text: str, attachment_path: str = None):
         send_telegram_message(msg, chat_id=chat_id)
         return
 
+    # Check if user is currently replying to an edit prompt for an alarm/reminder
+    edit_alarm_state = db.get_pending_action(f"editing_alarm_{chat_id}")
+    alarm_payload = None
+    if edit_alarm_state:
+        alarm_payload = edit_alarm_state["payload"]
+        db.delete_pending_action(f"editing_alarm_{chat_id}")
+
+    if alarm_payload:
+        send_telegram_message("✏️ Updating reminder...", chat_id=chat_id)
+        from agent.core import revise_alarm
+        updated_args = revise_alarm(alarm_payload, text)
+        _present_alarm_confirmation(chat_id, updated_args)
+        return
+
     # Check if user is currently replying to an edit prompt or modifying an active draft
     edit_state = db.get_pending_action(f"editing_{chat_id}")
     draft = None
@@ -466,6 +480,7 @@ def _present_alarm_confirmation(chat_id: str, args: dict):
         "inline_keyboard": [
             [
                 {"text": "✅ Confirm", "callback_data": f"confirm_alarm:{action_id}"},
+                {"text": "✏️ Edit", "callback_data": f"edit_alarm:{action_id}"},
                 {"text": "❌ Cancel", "callback_data": f"cancel_alarm:{action_id}"}
             ]
         ]
@@ -1088,6 +1103,34 @@ def handle_callback_query(cq: dict):
                 print(f"[Alarm] Error saving alarm: {e}")
                 answer_callback_query(cq_id, "Failed to set reminder.")
                 send_telegram_message("⚠️ Sorry, something went wrong setting the reminder.", chat_id=chat_id)
+
+        elif cmd == "edit_alarm":
+            if not action:
+                answer_callback_query(cq_id, "Action expired or unavailable.")
+                send_telegram_message("⚠️ This action is no longer available or has already been processed.", chat_id=chat_id)
+                return
+
+            if action.get("action_type") != "confirm_set_alarm":
+                answer_callback_query(cq_id, "Invalid action type.")
+                send_telegram_message("⚠️ Invalid action type.", chat_id=chat_id)
+                return
+
+            if str(action.get("chat_id")) != str(chat_id):
+                answer_callback_query(cq_id, "Unauthorized action.")
+                send_telegram_message("⚠️ You do not have permission to edit this reminder.", chat_id=chat_id)
+                return
+
+            payload = action.get("payload", {})
+            answer_callback_query(cq_id, "Editing reminder...")
+            db.save_pending_action(f"editing_alarm_{chat_id}", chat_id, "editing_alarm", payload, ttl_seconds=300)
+            send_telegram_message(
+                "✏️ Reply with what you would like to change.\n\n"
+                "Examples:\n"
+                "• `call Bob` (change task name)\n"
+                "• `at 8:30 PM` (change time)\n"
+                "• `tomorrow at 9 AM to call Priya` (change time & task)",
+                chat_id=chat_id
+            )
 
         elif cmd == "cancel_alarm":
             if not action:
