@@ -1231,7 +1231,12 @@ def check_and_fire_due_alarms():
     try:
         now_ts = int(time.time())
         pending_alarms = db.get_pending_alarms()
+        if not isinstance(pending_alarms, list):
+            return
+
         for alarm in pending_alarms:
+            if not isinstance(alarm, dict):
+                continue
             alarm_id = alarm.get("id")
             chat_id = alarm.get("chat_id")
             message = alarm.get("message")
@@ -1240,8 +1245,11 @@ def check_and_fire_due_alarms():
             if fire_at is not None and fire_at <= now_ts:
                 try:
                     msg = f"⏰ Reminder: {message}"
-                    send_telegram_message(msg, chat_id=chat_id)
-                    db.mark_alarm_fired(alarm_id)
+                    sent_success = send_telegram_message(msg, chat_id=chat_id)
+                    if sent_success is not False:
+                        db.mark_alarm_fired(alarm_id)
+                    else:
+                        print(f"[Alarm Checker Error] Telegram send returned False for alarm {alarm_id}. Leaving alarm pending.")
                 except Exception as alarm_err:
                     print(f"[Alarm Checker Error] Failed to send/mark alarm {alarm_id}: {_sanitize_error_message(alarm_err)}")
     except Exception as e:

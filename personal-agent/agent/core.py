@@ -287,12 +287,175 @@ def parse_natural_datetime(text: str, reference_datetime: Optional[datetime] = N
     )
     return target_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
+def parse_calendar_relative_intent(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Detect if user message specifies a calendar-relative reminder.
+    Supports variations of: 'remind me <offset> before <calendar event reference>'
+    Units supported: minutes, mins, min, hour, hours, hr, hrs.
+    Returns dict with offset_minutes (int), event_ref (str), and raw_ref (str), or None.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    pattern = r"\bremind\s+me\s+(\d+)\s*(minutes|mins|min|hours|hour|hrs|hr)s?\s+before\s+(.+)"
+    m = re.search(pattern, text.strip(), re.IGNORECASE)
+    if not m:
+        return None
+
+    val = int(m.group(1))
+    unit = m.group(2).lower()
+    raw_ref = m.group(3).strip()
+
+    if "hour" in unit or "hr" in unit:
+        offset_minutes = val * 60
+    else:
+        offset_minutes = val
+
+    raw_ref = re.sub(r"[\.\?\!\;]+$", "", raw_ref).strip()
+    clean_ref = re.sub(r"^(?:my|the|a|an)\s+", "", raw_ref, flags=re.IGNORECASE).strip()
+
+    return {
+        "offset_minutes": offset_minutes,
+        "event_ref": clean_ref or raw_ref,
+        "raw_ref": raw_ref,
+    }
+
+def process_calendar_relative_reminder(
+    user_message: str,
+    service: Any = None,
+    reference_datetime: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    Process a calendar-relative reminder request:
+    1. Identify intent and extract offset & event reference.
+    2. Lookup Google Calendar events via tools.calendar.list_upcoming_events.
+    3. Match target event by summary/title or attendees.
+    4. Validate event start time (future vs past, timed vs all-day).
+    5. Perform Python datetime arithmetic for alarm time.
+    6. Return structured candidate or error status.
+    """
+    intent = parse_calendar_relative_intent(user_message)
+    if not intent:
+        return {"status": "not_calendar_relative"}
+
+    offset_minutes = intent["offset_minutes"]
+    event_ref = intent["event_ref"]
+
+    if reference_datetime is None:
+        ref_dt = datetime.now().astimezone()
+    else:
+        ref_dt = reference_datetime
+        if ref_dt.tzinfo is None:
+            ref_dt = ref_dt.astimezone()
+
+    from tools.calendar import list_upcoming_events
+
+    try:
+        events = list_upcoming_events(start_datetime=ref_dt, service=service)
+    except Exception:
+        return {
+            "status": "error",
+            "message": "I couldn't access Google Calendar right now."
+        }
+
+    if not isinstance(events, list):
+        return {
+            "status": "error",
+            "message": "I couldn't access Google Calendar right now."
+        }
+
+    ref_lower = event_ref.lower()
+    stop_words = {"my", "the", "a", "an", "meeting", "event", "with", "for"}
+    keywords = [w for w in re.findall(r"\w+", ref_lower) if w not in stop_words]
+
+    matching_events = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        summary = str(ev.get("title", "")).lower()
+        raw_attendees = ev.get("attendees") or []
+        attendees = [str(a).lower() for a in raw_attendees if isinstance(a, (str, dict))]
+
+        is_match = False
+        if ref_lower in summary:
+            is_match = True
+        elif keywords:
+            kw_matches = 0
+            for kw in keywords:
+                if kw in summary or any(kw in att for att in attendees):
+                    kw_matches += 1
+            if kw_matches == len(keywords):
+                is_match = True
+        else:
+            is_match = True
+
+        if is_match:
+            matching_events.append(ev)
+
+    if len(matching_events) == 0:
+        return {
+            "status": "error",
+            "message": "I couldn't find a matching calendar event."
+        }
+    elif len(matching_events) > 1:
+        return {
+            "status": "error",
+            "message": "I found multiple matching meetings. Which one should I use?"
+        }
+
+    selected_event = matching_events[0]
+    start_val = str(selected_event.get("start", "")).strip()
+
+    if not start_val or "T" not in start_val or len(start_val) == 10:
+        return {
+            "status": "error",
+            "message": "I can't set a relative reminder for an all-day event without a specific start time."
+        }
+
+    try:
+        event_start_dt = datetime.fromisoformat(start_val)
+        if event_start_dt.tzinfo is None and ref_dt.tzinfo:
+            event_start_dt = event_start_dt.replace(tzinfo=ref_dt.tzinfo)
+    except ValueError:
+        return {
+            "status": "error",
+            "message": "I couldn't parse the start time for the matching calendar event."
+        }
+
+    if event_start_dt <= ref_dt:
+        return {
+            "status": "error",
+            "message": "That meeting has already started or ended."
+        }
+
+    alarm_dt = event_start_dt - timedelta(minutes=offset_minutes)
+    fire_at_iso = alarm_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    if offset_minutes == 60:
+        offset_str = "1 hour"
+    elif offset_minutes > 60 and offset_minutes % 60 == 0:
+        offset_str = f"{offset_minutes // 60} hours"
+    else:
+        offset_str = f"{offset_minutes} minutes"
+
+    event_title = selected_event.get("title") or "Meeting"
+    reminder_msg = f"{event_title} starts in {offset_str}."
+
+    return {
+        "status": "success",
+        "message": reminder_msg,
+        "fire_at": fire_at_iso,
+        "selected_event": selected_event,
+        "offset_minutes": offset_minutes,
+    }
+
 def validate_tool_call(
     tool_call: ToolCall,
     user_message: str,
     history: List[Dict[str, str]] = None,
     chat_id: str = None,
     reference_datetime: Optional[datetime] = None,
+    service: Any = None,
 ) -> ToolCall:
     """
     Code-level validation to prevent model hallucinations.
@@ -354,10 +517,29 @@ def validate_tool_call(
             return overridden
 
     elif tool_call.tool == "set_alarm":
-        fire_at_val = str(tool_call.args.get("fire_at", "")).strip()
-        parsed_dt = parse_natural_datetime(fire_at_val, reference_datetime=reference_datetime) or parse_natural_datetime(user_message, reference_datetime=reference_datetime)
-        if parsed_dt:
-            tool_call.args["fire_at"] = parsed_dt
+        cal_intent = parse_calendar_relative_intent(user_message)
+        if cal_intent:
+            cal_res = process_calendar_relative_reminder(
+                user_message, service=service, reference_datetime=reference_datetime
+            )
+            if cal_res["status"] == "success":
+                tool_call.args["message"] = cal_res["message"]
+                tool_call.args["fire_at"] = cal_res["fire_at"]
+                tool_call.args["offset_minutes"] = cal_res["offset_minutes"]
+            elif cal_res["status"] == "error":
+                overridden = ToolCall(
+                    tool="none",
+                    args={"message": cal_res["message"]},
+                    reasoning=f"Calendar-relative reminder resolution failed: {cal_res['message']}"
+                )
+                if hasattr(tool_call, "_was_retried"):
+                    overridden._was_retried = tool_call._was_retried
+                return overridden
+        else:
+            fire_at_val = str(tool_call.args.get("fire_at", "")).strip()
+            parsed_dt = parse_natural_datetime(fire_at_val, reference_datetime=reference_datetime) or parse_natural_datetime(user_message, reference_datetime=reference_datetime)
+            if parsed_dt:
+                tool_call.args["fire_at"] = parsed_dt
 
         schema = TOOL_ARGS_SCHEMAS.get("set_alarm")
         if schema:
@@ -457,7 +639,13 @@ def _resolve_tool_call_contact(tool_call: ToolCall, user_message: str, chat_id: 
 
     return tool_call
 
-def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id: Optional[str] = None) -> Union[ToolCall, TaskPlan]:
+def call_agent(
+    user_message: str,
+    history: List[Dict[str, str]] = None,
+    chat_id: Optional[str] = None,
+    reference_datetime: Optional[datetime] = None,
+    service: Any = None,
+) -> Union[ToolCall, TaskPlan]:
     """
     Main entry point for agent tool choice.
     Returns a validated ToolCall for single-tool requests, or a TaskPlan for
@@ -465,6 +653,27 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
     """
     if history is None:
         history = []
+
+    cal_intent = parse_calendar_relative_intent(user_message)
+    if cal_intent:
+        cal_res = process_calendar_relative_reminder(user_message, service=service, reference_datetime=reference_datetime)
+        if cal_res["status"] == "success":
+            res = ToolCall(
+                tool="set_alarm",
+                args={
+                    "message": cal_res["message"],
+                    "fire_at": cal_res["fire_at"],
+                    "offset_minutes": cal_res["offset_minutes"],
+                },
+                reasoning=f"Calendar-relative reminder set for event '{cal_res['selected_event'].get('title')}'."
+            )
+            return validate_tool_call(res, user_message, history=history, chat_id=chat_id, reference_datetime=reference_datetime, service=service)
+        elif cal_res["status"] == "error":
+            return ToolCall(
+                tool="none",
+                args={"message": cal_res["message"]},
+                reasoning=f"Calendar-relative reminder resolution failed: {cal_res['message']}"
+            )
 
     # Auto-extract user display name if stated
     if chat_id:
@@ -561,7 +770,7 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
         res = ToolCall.model_validate_json(raw_response)
         res._was_retried = False
         res = _resolve_tool_call_contact(res, user_message, chat_id=chat_id)
-        res = validate_tool_call(res, user_message, history=history, chat_id=chat_id)
+        res = validate_tool_call(res, user_message, history=history, chat_id=chat_id, reference_datetime=reference_datetime, service=service)
     except (ValidationError, json.JSONDecodeError) as e:
         # Single correction retry loop
         correction_msg = (
@@ -582,7 +791,7 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
             res = ToolCall.model_validate_json(raw_retry)
             res._was_retried = True
             res = _resolve_tool_call_contact(res, user_message, chat_id=chat_id)
-            res = validate_tool_call(res, user_message, history=history, chat_id=chat_id)
+            res = validate_tool_call(res, user_message, history=history, chat_id=chat_id, reference_datetime=reference_datetime, service=service)
         except Exception:
             try:
                 data = json.loads(raw_response)
@@ -596,7 +805,7 @@ def call_agent(user_message: str, history: List[Dict[str, str]] = None, chat_id:
                         reasoning=data.get("reasoning", "No reasoning provided.")
                     )
                     res = _resolve_tool_call_contact(res, user_message, chat_id=chat_id)
-                    res = validate_tool_call(res, user_message, history=history, chat_id=chat_id)
+                    res = validate_tool_call(res, user_message, history=history, chat_id=chat_id, reference_datetime=reference_datetime, service=service)
                 else:
                     raise ValueError("Invalid format")
             except Exception:

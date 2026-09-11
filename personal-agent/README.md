@@ -86,7 +86,22 @@ The agent will:
 - Calendar event editing or deletion
 - Recurring events
 - Conflict detection
-- Advanced reminders/notifications
+
+### Reminder System Integration
+
+**Supported Features:**
+- Standard reminders with natural datetime parsing (e.g., *"Remind me tomorrow at 9 AM to call Priya"*, *"Remind me in 30 minutes"*)
+- Calendar-relative reminders using existing Google Calendar OAuth (e.g., *"Remind me 30 minutes before my RAG meeting"*)
+- Telegram inline confirmation flow (`✅ Confirm` / `❌ Cancel`)
+- Persistent SQLite alarm database (`alarms` table)
+- Background daemon checker thread (`AlarmCheckerThread`, 30s polling cycle)
+- Telegram delivery retry protection (retains pending state if delivery fails)
+
+**Out of Scope / Current Limitations:**
+- No recurring reminders
+- No snooze functionality
+- No reminder editing
+- No external schedulers (uses native SQLite + Python background daemon thread)
 
 ## Customize
 

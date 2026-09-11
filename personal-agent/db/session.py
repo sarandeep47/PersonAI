@@ -506,74 +506,99 @@ def export_contacts_csv(chat_id: str) -> Optional[str]:
 
 def save_alarm(chat_id: str, message: str, fire_at: float, alarm_id: Optional[str] = None, created_at: Optional[float] = None) -> str:
     """
-    Save a new alarm to SQLite database.
-    Returns the alarm id.
+    Save a new alarm/reminder to the SQLite database.
+
+    Args:
+        chat_id: Telegram chat ID owning the alarm.
+        message: Descriptive reminder text to present when fired.
+        fire_at: Target Unix timestamp (float/REAL) when the reminder is due.
+        alarm_id: Optional explicit UUID string. Generated automatically if None.
+        created_at: Optional Unix creation timestamp. Defaults to current time.
+
+    Returns:
+        The persistent alarm ID string.
     """
     if not alarm_id:
         alarm_id = str(uuid.uuid4())
     if created_at is None:
         created_at = time.time()
 
-    conn = get_db()
-    with conn:
-        conn.execute(
-            "INSERT INTO alarms (id, chat_id, message, fire_at, fired, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-            (alarm_id, str(chat_id), str(message), float(fire_at), float(created_at))
-        )
-    return alarm_id
+    try:
+        conn = get_db()
+        with conn:
+            conn.execute(
+                "INSERT INTO alarms (id, chat_id, message, fire_at, fired, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+                (alarm_id, str(chat_id), str(message), float(fire_at), float(created_at))
+            )
+        return alarm_id
+    except Exception as e:
+        print(f"[DB Error] save_alarm failed for chat_id={chat_id}: {e}")
+        raise RuntimeError(f"Database failure saving alarm: {e}") from e
 
 def get_pending_alarms(chat_id: Optional[str] = None) -> list[dict]:
     """
     Retrieve all pending alarms (fired = 0) ordered by fire_at ASC.
     If chat_id is provided, filters for that chat_id.
     """
-    conn = get_db()
-    cursor = conn.cursor()
-    if chat_id is not None:
-        cursor.execute(
-            "SELECT * FROM alarms WHERE fired = 0 AND chat_id = ? ORDER BY fire_at ASC",
-            (str(chat_id),)
-        )
-    else:
-        cursor.execute(
-            "SELECT * FROM alarms WHERE fired = 0 ORDER BY fire_at ASC"
-        )
-    rows = cursor.fetchall()
-    return [dict(r) for r in rows]
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        if chat_id is not None:
+            cursor.execute(
+                "SELECT * FROM alarms WHERE fired = 0 AND chat_id = ? ORDER BY fire_at ASC",
+                (str(chat_id),)
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM alarms WHERE fired = 0 ORDER BY fire_at ASC"
+            )
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[DB Error] get_pending_alarms failed: {e}")
+        return []
 
 def mark_alarm_fired(alarm_id: str) -> bool:
     """
     Safely mark one alarm as fired (fired = 1).
     Returns True if an alarm row was updated, False otherwise.
     """
-    conn = get_db()
-    with conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE alarms SET fired = 1 WHERE id = ?",
-            (str(alarm_id),)
-        )
-        return cursor.rowcount > 0
+    try:
+        conn = get_db()
+        with conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE alarms SET fired = 1 WHERE id = ?",
+                (str(alarm_id),)
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"[DB Error] mark_alarm_fired failed for alarm_id={alarm_id}: {e}")
+        return False
 
 def list_alarms(chat_id: str, include_fired: bool = False) -> list[dict]:
     """
     List alarms for a chat_id ordered by fire_at ASC.
     By default returns pending alarms only unless include_fired is True.
     """
-    conn = get_db()
-    cursor = conn.cursor()
-    if include_fired:
-        cursor.execute(
-            "SELECT * FROM alarms WHERE chat_id = ? ORDER BY fire_at ASC",
-            (str(chat_id),)
-        )
-    else:
-        cursor.execute(
-            "SELECT * FROM alarms WHERE chat_id = ? AND fired = 0 ORDER BY fire_at ASC",
-            (str(chat_id),)
-        )
-    rows = cursor.fetchall()
-    return [dict(r) for r in rows]
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        if include_fired:
+            cursor.execute(
+                "SELECT * FROM alarms WHERE chat_id = ? ORDER BY fire_at ASC",
+                (str(chat_id),)
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM alarms WHERE chat_id = ? AND fired = 0 ORDER BY fire_at ASC",
+                (str(chat_id),)
+            )
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[DB Error] list_alarms failed for chat_id={chat_id}: {e}")
+        return []
 
 def delete_alarm(alarm_id: str, chat_id: Optional[str] = None) -> bool:
     """
@@ -581,20 +606,24 @@ def delete_alarm(alarm_id: str, chat_id: Optional[str] = None) -> bool:
     If chat_id is provided, also checks that chat_id matches.
     Returns True if an alarm was deleted, False otherwise.
     """
-    conn = get_db()
-    with conn:
-        cursor = conn.cursor()
-        if chat_id is not None:
-            cursor.execute(
-                "DELETE FROM alarms WHERE id = ? AND chat_id = ?",
-                (str(alarm_id), str(chat_id))
-            )
-        else:
-            cursor.execute(
-                "DELETE FROM alarms WHERE id = ?",
-                (str(alarm_id),)
-            )
-        return cursor.rowcount > 0
+    try:
+        conn = get_db()
+        with conn:
+            cursor = conn.cursor()
+            if chat_id is not None:
+                cursor.execute(
+                    "DELETE FROM alarms WHERE id = ? AND chat_id = ?",
+                    (str(alarm_id), str(chat_id))
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM alarms WHERE id = ?",
+                    (str(alarm_id),)
+                )
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"[DB Error] delete_alarm failed for alarm_id={alarm_id}: {e}")
+        return False
 
 # Initialize DB on import
 init_db()
