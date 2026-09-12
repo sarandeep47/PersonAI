@@ -81,6 +81,16 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id          TEXT PRIMARY KEY,
+                chat_id     TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                done        INTEGER DEFAULT 0,
+                created_at  REAL NOT NULL,
+                done_at     REAL
+            )
+        """)
 
 # --- Pending Actions (Inline confirmation) ---
 
@@ -623,6 +633,99 @@ def delete_alarm(alarm_id: str, chat_id: Optional[str] = None) -> bool:
             return cursor.rowcount > 0
     except Exception as e:
         print(f"[DB Error] delete_alarm failed for alarm_id={alarm_id}: {e}")
+        return False
+
+# --- Tasks Persistence ---
+
+def add_task(chat_id: str, title: str) -> dict:
+    """
+    Create and store a task for a given chat_id.
+
+    Args:
+        chat_id: Telegram chat ID owning the task.
+        title: Title/description of the task.
+
+    Returns:
+        The created task dictionary.
+    """
+    task_id = str(uuid.uuid4())
+    now = time.time()
+    title_str = str(title).strip()
+    conn = get_db()
+    with conn:
+        conn.execute(
+            "INSERT INTO tasks (id, chat_id, title, done, created_at, done_at) VALUES (?, ?, ?, 0, ?, NULL)",
+            (task_id, str(chat_id), title_str, now)
+        )
+    return {
+        "id": task_id,
+        "chat_id": str(chat_id),
+        "title": title_str,
+        "done": 0,
+        "created_at": now,
+        "done_at": None
+    }
+
+def list_tasks(chat_id: str) -> list[dict]:
+    """
+    Return all tasks belonging to the specified chat_id ordered by created_at DESC.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM tasks WHERE chat_id = ? ORDER BY created_at DESC",
+            (str(chat_id),)
+        )
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[DB Error] list_tasks failed for chat_id={chat_id}: {e}")
+        return []
+
+def complete_task(chat_id: str, task_id: str) -> Optional[dict]:
+    """
+    Mark a task as completed (done = 1, done_at = now) for a specific chat_id.
+    Returns the updated task dict if successful, or None if task does not exist for chat_id.
+    """
+    now = time.time()
+    try:
+        conn = get_db()
+        with conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE tasks SET done = 1, done_at = ? WHERE id = ? AND chat_id = ?",
+                (now, str(task_id), str(chat_id))
+            )
+            if cursor.rowcount == 0:
+                return None
+
+            cursor.execute(
+                "SELECT * FROM tasks WHERE id = ? AND chat_id = ?",
+                (str(task_id), str(chat_id))
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB Error] complete_task failed for task_id={task_id}, chat_id={chat_id}: {e}")
+        return None
+
+def delete_task(chat_id: str, task_id: str) -> bool:
+    """
+    Delete a task belonging to a specific chat_id.
+    Returns True if task was deleted, False if task does not exist for chat_id.
+    """
+    try:
+        conn = get_db()
+        with conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM tasks WHERE id = ? AND chat_id = ?",
+                (str(task_id), str(chat_id))
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"[DB Error] delete_task failed for task_id={task_id}, chat_id={chat_id}: {e}")
         return False
 
 # Initialize DB on import

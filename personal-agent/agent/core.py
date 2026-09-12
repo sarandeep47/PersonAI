@@ -635,7 +635,63 @@ def validate_tool_call(
                     except ValueError:
                         pass
 
+    elif tool_call.tool == "add_task":
+        title_val = str(tool_call.args.get("title", "")).strip()
+        if title_val:
+            cleaned = clean_task_title(title_val, user_message)
+            if cleaned:
+                tool_call.args["title"] = cleaned
+
     return tool_call
+
+
+def clean_task_title(title: str, user_message: str = "") -> str:
+    """
+    Clean and extract the actual task title by stripping natural language command wrappers,
+    while preserving meaningful words that are part of the title itself.
+    """
+    if not title:
+        return ""
+
+    text = title.strip()
+
+    # 1. If wrapped in quotes, e.g. 'Add Telegram support' or "Test Telegram integration"
+    m_quote = re.match(r"^['\"`](.+)['\"`]$", text)
+    if m_quote:
+        return m_quote.group(1).strip()
+
+    # 2. Remove trailing command suffixes: "to my tasks", "to my task", "in my tasks", "to the task list", "to tasks"
+    suffix_pattern = r"\s+(?:to|in|into)\s+(?:my\s+|the\s+)?tasks?\s*$"
+    text = re.sub(suffix_pattern, "", text, flags=re.IGNORECASE).strip()
+
+    # 3. Remove leading command prefixes:
+    prefix_patterns = [
+        r"^add\s+a\s+task\s*(?:called|named|to|for|:|-|–)?\s*",
+        r"^create\s+(?:a\s+)?task\s*(?:called|named|to|for|:|-|–)?\s*",
+        r"^add\s+task\s*(?:called|named|to|for|:|-|–)?\s*",
+    ]
+    matched_prefix = False
+    for pat in prefix_patterns:
+        if re.search(pat, text, flags=re.IGNORECASE):
+            text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
+            matched_prefix = True
+            break
+
+    if not matched_prefix:
+        if re.match(r"^add\s+", text, flags=re.IGNORECASE):
+            msg_has_suffix = bool(user_message and re.search(suffix_pattern, user_message, flags=re.IGNORECASE))
+            title_had_suffix = bool(re.search(suffix_pattern, title, flags=re.IGNORECASE))
+            if msg_has_suffix or title_had_suffix:
+                text = re.sub(r"^add\s+", "", text, flags=re.IGNORECASE).strip()
+
+    # Strip any leading punctuation delimiter (like : or -) left behind
+    text = re.sub(r"^[:\-–]\s*", "", text).strip()
+
+    m_quote2 = re.match(r"^['\"`](.+)['\"`]$", text)
+    if m_quote2:
+        text = m_quote2.group(1).strip()
+
+    return text
 
 def _resolve_tool_call_contact(tool_call: ToolCall, user_message: str, chat_id: Optional[str] = None) -> ToolCall:
     """

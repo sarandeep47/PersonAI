@@ -144,6 +144,39 @@ class SetAlarmArgs(BaseModel):
             raise ValueError(f"Invalid ISO datetime string: '{clean}'")
         return clean
 
+class AddTaskArgs(BaseModel):
+    title: str = Field(..., description="Title or description of the task to create")
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Title must not be empty.")
+        return v.strip()
+
+class ListTasksArgs(BaseModel):
+    pass
+
+class CompleteTaskArgs(BaseModel):
+    task_id: str = Field(..., description="ID of the task to mark completed")
+
+    @field_validator("task_id")
+    @classmethod
+    def validate_task_id(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("task_id must not be empty.")
+        return v.strip()
+
+class DeleteTaskArgs(BaseModel):
+    task_id: str = Field(..., description="ID of the task to delete")
+
+    @field_validator("task_id")
+    @classmethod
+    def validate_task_id(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("task_id must not be empty.")
+        return v.strip()
+
 ToolName = Literal[
     "send_email",
     "search_inbox",
@@ -156,6 +189,10 @@ ToolName = Literal[
     "list_calendar",
     "set_alarm",
     "set_reminder",
+    "add_task",
+    "list_tasks",
+    "complete_task",
+    "delete_task",
     "none",
 ]
 
@@ -189,6 +226,10 @@ TOOL_ARGS_SCHEMAS: Dict[str, type[BaseModel]] = {
     "list_calendar": ListCalendarArgs,
     "set_alarm": SetAlarmArgs,
     "set_reminder": SetAlarmArgs,
+    "add_task": AddTaskArgs,
+    "list_tasks": ListTasksArgs,
+    "complete_task": CompleteTaskArgs,
+    "delete_task": DeleteTaskArgs,
     "none": NoneArgs,
 }
 

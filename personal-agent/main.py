@@ -244,6 +244,11 @@ def handle_message(chat_id: str, text: str, attachment_path: str = None):
                 send_telegram_message(msg, chat_id=chat_id)
                 db.add_message(chat_id, "assistant", msg)
 
+        elif tool_call.tool in ["add_task", "list_tasks", "complete_task", "delete_task"]:
+            success, output_msg = execute_single_tool_call(tool_call, chat_id)
+            send_telegram_message(output_msg, chat_id=chat_id)
+            db.add_message(chat_id, "assistant", output_msg)
+
         elif tool_call.tool == "none":
             msg = tool_call.args.get("message", "How can I help you with your emails?")
             send_telegram_message(msg, chat_id=chat_id)
@@ -507,6 +512,10 @@ _TOOL_DISPLAY_NAMES = {
     "schedule_calendar": "Schedule calendar event",
     "list_calendar":     "List calendar events",
     "set_alarm":         "Set reminder",
+    "add_task":          "Add task",
+    "list_tasks":        "List tasks",
+    "complete_task":     "Complete task",
+    "delete_task":       "Delete task",
     "none":              "No action",
 }
 
@@ -531,6 +540,7 @@ def _format_task_plan_confirmation(plan: TaskPlan) -> str:
         "instructions":     "Instructions",
         "new_name":         "New name",
         "title":            "Title",
+        "task_id":          "Task ID",
         "date":             "Date",
         "start_time":       "Start time",
         "duration_minutes": "Duration (min)",
@@ -653,6 +663,57 @@ def _sanitize_error_message(err: Exception) -> str:
         err_str = err_str[:100] + "..."
 
     return f"Execution error: {err_str}"
+
+
+def _resolve_task(chat_id: str, task_ref: str) -> tuple[Optional[dict], list[dict], str]:
+    """
+    Safely resolve a user's task_id / title / reference string to a specific task dict for chat_id.
+
+    Returns:
+        (matched_task, candidate_matches, status_code)
+        status_code: "EXACT", "UNIQUE", "MULTIPLE", "NOT_FOUND"
+    """
+    task_ref_str = str(task_ref).strip()
+    if not task_ref_str:
+        return None, [], "NOT_FOUND"
+
+    tasks = db.list_tasks(chat_id)
+    if not tasks:
+        return None, [], "NOT_FOUND"
+
+    # 1. Exact task ID match
+    for t in tasks:
+        if t["id"] == task_ref_str:
+            return t, [t], "EXACT"
+
+    ref_lower = task_ref_str.lower()
+
+    # 2. Exact title match (case-insensitive & whitespace-normalized)
+    exact_title_matches = [t for t in tasks if t["title"].strip().lower() == ref_lower]
+    if len(exact_title_matches) == 1:
+        return exact_title_matches[0], exact_title_matches, "EXACT"
+    elif len(exact_title_matches) > 1:
+        return None, exact_title_matches, "MULTIPLE"
+
+    # 3. Handle generic references like "that task", "the task", "the previous task", "that", "this task"
+    generic_refs = {"that task", "the task", "previous task", "the previous task", "that", "this task"}
+    if ref_lower in generic_refs:
+        if len(tasks) == 1:
+            return tasks[0], tasks, "UNIQUE"
+        else:
+            return None, tasks, "MULTIPLE"
+
+    # 4. Partial/substring title match
+    partial_matches = [
+        t for t in tasks
+        if ref_lower in t["title"].strip().lower() or t["title"].strip().lower() in ref_lower
+    ]
+    if len(partial_matches) == 1:
+        return partial_matches[0], partial_matches, "UNIQUE"
+    elif len(partial_matches) > 1:
+        return None, partial_matches, "MULTIPLE"
+
+    return None, [], "NOT_FOUND"
 
 
 def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path: str = None) -> tuple[bool, str]:
@@ -850,6 +911,63 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
                 return True, succ_msg
             except Exception as e:
                 return False, _sanitize_error_message(e)
+
+        elif tool_name == "add_task":
+            title = str(args.get("title", "")).strip()
+            if not title:
+                return False, "Task title is required."
+            task = db.add_task(chat_id=chat_id, title=title)
+            return True, f"✅ Added task: {task['title']}"
+
+        elif tool_name == "list_tasks":
+            tasks = db.list_tasks(chat_id=chat_id)
+            if not tasks:
+                return True, "📝 You don't have any tasks yet."
+            lines = ["📝 *Your tasks*\n"]
+            for i, t in enumerate(tasks, start=1):
+                icon = "✅" if t.get("done") else "⬜"
+                lines.append(f"{i}. {icon} {t['title']}")
+            return True, "\n".join(lines)
+
+        elif tool_name == "complete_task":
+            task_ref = str(args.get("task_id", "")).strip()
+            if not task_ref:
+                return False, "Task reference or ID required."
+
+            matched_task, candidates, status = _resolve_task(chat_id, task_ref)
+            if status in ("EXACT", "UNIQUE") and matched_task:
+                updated = db.complete_task(chat_id, matched_task["id"])
+                if updated:
+                    return True, f"✅ Marked task as complete: {updated['title']}"
+                else:
+                    return False, f"❌ I couldn't find a task matching '{task_ref}'."
+            elif status == "MULTIPLE" and candidates:
+                lines = ["Which task did you mean? I found multiple matching tasks:\n"]
+                for i, c in enumerate(candidates, start=1):
+                    lines.append(f"{i}. {c['title']}")
+                return False, "\n".join(lines)
+            else:
+                return False, f"❌ I couldn't find a task matching '{task_ref}'."
+
+        elif tool_name == "delete_task":
+            task_ref = str(args.get("task_id", "")).strip()
+            if not task_ref:
+                return False, "Task reference or ID required."
+
+            matched_task, candidates, status = _resolve_task(chat_id, task_ref)
+            if status in ("EXACT", "UNIQUE") and matched_task:
+                success = db.delete_task(chat_id, matched_task["id"])
+                if success:
+                    return True, f"🗑️ Deleted task: {matched_task['title']}"
+                else:
+                    return False, f"❌ I couldn't find a task matching '{task_ref}'."
+            elif status == "MULTIPLE" and candidates:
+                lines = ["Which task did you mean? I found multiple matching tasks:\n"]
+                for i, c in enumerate(candidates, start=1):
+                    lines.append(f"{i}. {c['title']}")
+                return False, "\n".join(lines)
+            else:
+                return False, f"❌ I couldn't find a task matching '{task_ref}'."
 
         elif tool_name == "none":
             msg = str(args.get("message", "No action executed.")).strip()
