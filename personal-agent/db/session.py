@@ -91,6 +91,17 @@ def init_db():
                 done_at     REAL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS context_entities (
+                chat_id     TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id   TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                details     TEXT,
+                updated_at  REAL NOT NULL,
+                PRIMARY KEY (chat_id, entity_type)
+            )
+        """)
 
 # --- Pending Actions (Inline confirmation) ---
 
@@ -727,6 +738,73 @@ def delete_task(chat_id: str, task_id: str) -> bool:
     except Exception as e:
         print(f"[DB Error] delete_task failed for task_id={task_id}, chat_id={chat_id}: {e}")
         return False
+
+# --- Context Entities (Conversation Memory) ---
+
+def save_context_entity(
+    chat_id: str,
+    entity_type: str,
+    entity_id: str,
+    title: str,
+    details: Optional[Any] = None
+) -> Optional[dict]:
+    """
+    Save or update the latest context entity for a specific chat_id and entity_type.
+    Replaces any existing context entity for the same (chat_id, entity_type) pair.
+    """
+    now = time.time()
+    chat_id_str = str(chat_id)
+    entity_type_str = str(entity_type)
+    entity_id_str = str(entity_id)
+    title_str = str(title)
+
+    if details is None:
+        details_str = None
+    elif isinstance(details, (dict, list)):
+        details_str = json.dumps(details)
+    else:
+        details_str = str(details)
+
+    try:
+        conn = get_db()
+        with conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO context_entities
+                (chat_id, entity_type, entity_id, title, details, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (chat_id_str, entity_type_str, entity_id_str, title_str, details_str, now)
+            )
+        return {
+            "chat_id": chat_id_str,
+            "entity_type": entity_type_str,
+            "entity_id": entity_id_str,
+            "title": title_str,
+            "details": details_str,
+            "updated_at": now
+        }
+    except Exception as e:
+        print(f"[DB Error] save_context_entity failed for chat_id={chat_id}, entity_type={entity_type}: {e}")
+        return None
+
+def get_context_entity(chat_id: str, entity_type: str) -> Optional[dict]:
+    """
+    Retrieve the latest context entity for a specific chat_id and entity_type.
+    Returns None if no context entity exists for the given chat_id and entity_type.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM context_entities WHERE chat_id = ? AND entity_type = ?",
+            (str(chat_id), str(entity_type))
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB Error] get_context_entity failed for chat_id={chat_id}, entity_type={entity_type}: {e}")
+        return None
 
 # Initialize DB on import
 init_db()

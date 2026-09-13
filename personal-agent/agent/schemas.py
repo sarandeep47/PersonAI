@@ -38,6 +38,7 @@ class ScheduleCalendarArgs(BaseModel):
     start_time: str = Field(..., description="Start time string (e.g. '14:00' or '02:00 PM')")
     duration_minutes: int = Field(..., gt=0, description="Duration in minutes (must be > 0)")
     attendees: Optional[List[str]] = Field(default=None, description="Optional list of attendee email addresses")
+    event_id: Optional[str] = Field(default=None, description="Optional Google Calendar event ID if updating an existing event")
 
     @field_validator("title")
     @classmethod

@@ -3,6 +3,7 @@ import time
 import uuid
 import threading
 import os
+import json
 from datetime import datetime, timedelta
 from tools.email_reader import fetch_unread_emails
 from tools.telegram import send_telegram_message, get_telegram_updates, answer_callback_query, download_telegram_file, send_telegram_document
@@ -286,6 +287,13 @@ def _present_email_confirmation(chat_id: str, args: dict, attachment_path: str =
         "body": body,
         "attachment_path": attachment_path
     })
+    db.save_context_entity(
+        chat_id=chat_id,
+        entity_type="email",
+        entity_id=action_id,
+        title=f"Draft to {to}: {subject}" if subject else f"Draft to {to}",
+        details=json.dumps({"to": to, "subject": subject, "body": body})
+    )
 
     attachment_info = ""
     if attachment_path and os.path.exists(attachment_path):
@@ -365,7 +373,8 @@ def _format_calendar_success_message(res: dict) -> str:
             if end_raw:
                 time_str = f"{start_raw} – {end_raw}"
 
-    lines = ["✅ *Calendar event created*", "", f"*{title}*"]
+    header = "✅ *Calendar event updated*" if res.get("is_updated") else "✅ *Calendar event created*"
+    lines = [header, "", f"*{title}*"]
     if date_str:
         lines.append(date_str)
     if time_str:
@@ -379,12 +388,13 @@ def _format_calendar_success_message(res: dict) -> str:
 
 
 def _present_calendar_confirmation(chat_id: str, args: dict):
-    """Present calendar event creation with inline confirmation buttons."""
+    """Present calendar event creation or update with inline confirmation buttons."""
     title = str(args.get("title", "")).strip()
     date = str(args.get("date", "")).strip()
     start_time = str(args.get("start_time", "")).strip()
     duration_minutes = args.get("duration_minutes", 30)
     attendees = args.get("attendees") or []
+    event_id = args.get("event_id")
 
     if not title or not date or not start_time:
         msg = "⚠️ Please specify title, date, and start time for the calendar event."
@@ -399,7 +409,15 @@ def _present_calendar_confirmation(chat_id: str, args: dict):
         "start_time": start_time,
         "duration_minutes": duration_minutes,
         "attendees": attendees,
+        "event_id": event_id,
     })
+    db.save_context_entity(
+        chat_id=chat_id,
+        entity_type="calendar",
+        entity_id=event_id or action_id,
+        title=title,
+        details=f"{date} {start_time}"
+    )
 
     formatted_date, formatted_time_range = _format_calendar_datetime_range(date, start_time, duration_minutes)
 
@@ -409,13 +427,16 @@ def _present_calendar_confirmation(chat_id: str, args: dict):
         if clean_attendees:
             attendee_info = f"\n*Attendees:* {', '.join(clean_attendees)}"
 
+    header_str = "📅 *Reschedule Calendar Event?*" if event_id else "📅 *Schedule Calendar Event?*"
+    prompt_str = "Update this event to the new time?" if event_id else "Create this event?"
+
     msg = (
-        f"📅 *Schedule Calendar Event?*\n\n"
+        f"{header_str}\n\n"
         f"*Title:* {title}\n"
         f"*Date:* {formatted_date}\n"
         f"*Time:* {formatted_time_range}"
         f"{attendee_info}\n\n"
-        f"Create this event?"
+        f"{prompt_str}"
     )
 
     reply_markup = {
@@ -695,9 +716,26 @@ def _resolve_task(chat_id: str, task_ref: str) -> tuple[Optional[dict], list[dic
     elif len(exact_title_matches) > 1:
         return None, exact_title_matches, "MULTIPLE"
 
-    # 3. Handle generic references like "that task", "the task", "the previous task", "that", "this task"
-    generic_refs = {"that task", "the task", "previous task", "the previous task", "that", "this task"}
+    # 3. Contextual reference resolution for tasks ("that task", "the task", "that", "it", "this", etc.)
+    generic_refs = {"that task", "the task", "previous task", "the previous task", "that", "this task", "it", "this", "the item", "that item"}
     if ref_lower in generic_refs:
+        task_ctx = db.get_context_entity(chat_id, "task")
+        if task_ctx:
+            ctx_id = task_ctx.get("entity_id")
+            ctx_details = str(task_ctx.get("details", "")).lower()
+            ctx_title = str(task_ctx.get("title", "")).strip().lower()
+
+            if "deleted" not in ctx_details:
+                matched_ctx = [
+                    t for t in tasks
+                    if t["id"] == ctx_id or t["title"].strip().lower() == ctx_title
+                ]
+                if len(matched_ctx) == 1:
+                    return matched_ctx[0], matched_ctx, "UNIQUE"
+                elif not matched_ctx:
+                    # Stale context (task no longer exists in task list)
+                    return None, [], "NOT_FOUND"
+
         if len(tasks) == 1:
             return tasks[0], tasks, "UNIQUE"
         else:
@@ -748,6 +786,13 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
                 attachment_path=attachment_path or args.get("attachment_path")
             )
             if success:
+                db.save_context_entity(
+                    chat_id=chat_id,
+                    entity_type="email",
+                    entity_id=f"sent_{to}",
+                    title=f"Email to {to}: {subject}" if subject else f"Email to {to}",
+                    details=json.dumps({"to": to, "subject": subject, "body": body})
+                )
                 return True, f"Email successfully sent to `{to}`."
             else:
                 return False, "Failed to send email. Check configuration/logs."
@@ -777,6 +822,13 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
             email_id = str(args.get("email_id", "")).strip()
             if not email_id:
                 return False, "Email ID required."
+            db.save_context_entity(
+                chat_id=chat_id,
+                entity_type="email",
+                entity_id=email_id,
+                title=f"Email {email_id}",
+                details=f"Read email {email_id}"
+            )
             return True, f"Read email `{email_id}` successfully."
 
         elif tool_name == "draft_reply":
@@ -784,6 +836,13 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
             instructions = str(args.get("instructions", "")).strip()
             if not email_id:
                 return False, "Email ID required to draft reply."
+            db.save_context_entity(
+                chat_id=chat_id,
+                entity_type="email",
+                entity_id=email_id,
+                title=f"Draft reply for email {email_id}",
+                details=f"Instructions: {instructions}"
+            )
             return True, f"Drafted reply for email `{email_id}`."
 
         elif tool_name == "export_contacts":
@@ -856,8 +915,21 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
                 start_time=start_time,
                 duration_minutes=duration_minutes,
                 attendees=attendees,
+                event_id=args.get("event_id"),
             )
             if isinstance(res, dict) and res.get("status") == "success":
+                evt_id = str(res.get("id") or f"evt_{uuid.uuid4().hex[:8]}")
+                evt_title = str(res.get("title") or title)
+                start_fmt = str(res.get("start") or f"{date} {start_time}")
+                end_fmt = str(res.get("end") or "")
+                details_str = f"{start_fmt} to {end_fmt}" if end_fmt else start_fmt
+                db.save_context_entity(
+                    chat_id=chat_id,
+                    entity_type="calendar",
+                    entity_id=evt_id,
+                    title=evt_title,
+                    details=details_str
+                )
                 summary = _format_calendar_success_message(res)
                 return True, summary
             else:
@@ -917,6 +989,14 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
             if not title:
                 return False, "Task title is required."
             task = db.add_task(chat_id=chat_id, title=title)
+            if task and isinstance(task, dict):
+                db.save_context_entity(
+                    chat_id=chat_id,
+                    entity_type="task",
+                    entity_id=task["id"],
+                    title=task["title"],
+                    details="Status: pending"
+                )
             return True, f"✅ Added task: {task['title']}"
 
         elif tool_name == "list_tasks":
@@ -938,6 +1018,13 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
             if status in ("EXACT", "UNIQUE") and matched_task:
                 updated = db.complete_task(chat_id, matched_task["id"])
                 if updated:
+                    db.save_context_entity(
+                        chat_id=chat_id,
+                        entity_type="task",
+                        entity_id=updated["id"],
+                        title=updated["title"],
+                        details="Status: completed"
+                    )
                     return True, f"✅ Marked task as complete: {updated['title']}"
                 else:
                     return False, f"❌ I couldn't find a task matching '{task_ref}'."
@@ -958,6 +1045,13 @@ def execute_single_tool_call(tool_call: ToolCall, chat_id: str, attachment_path:
             if status in ("EXACT", "UNIQUE") and matched_task:
                 success = db.delete_task(chat_id, matched_task["id"])
                 if success:
+                    db.save_context_entity(
+                        chat_id=chat_id,
+                        entity_type="task",
+                        entity_id=matched_task["id"],
+                        title=matched_task["title"],
+                        details="Status: deleted"
+                    )
                     return True, f"🗑️ Deleted task: {matched_task['title']}"
                 else:
                     return False, f"❌ I couldn't find a task matching '{task_ref}'."
@@ -1143,6 +1237,7 @@ def handle_callback_query(cq: dict):
             start_time = payload.get("start_time", "")
             duration_minutes = payload.get("duration_minutes", 30)
             attendees = payload.get("attendees")
+            event_id = payload.get("event_id")
 
             res = create_event(
                 title=title,
@@ -1150,8 +1245,21 @@ def handle_callback_query(cq: dict):
                 start_time=start_time,
                 duration_minutes=duration_minutes,
                 attendees=attendees,
+                event_id=event_id,
             )
             if isinstance(res, dict) and res.get("status") == "success":
+                evt_id = str(res.get("id") or event_id or f"evt_{uuid.uuid4().hex[:8]}")
+                evt_title = str(res.get("title") or title)
+                start_fmt = str(res.get("start") or f"{date} {start_time}")
+                end_fmt = str(res.get("end") or "")
+                details_str = f"{start_fmt} to {end_fmt}" if end_fmt else start_fmt
+                db.save_context_entity(
+                    chat_id=chat_id,
+                    entity_type="calendar",
+                    entity_id=evt_id,
+                    title=evt_title,
+                    details=details_str
+                )
                 succ_msg = _format_calendar_success_message(res)
                 send_telegram_message(succ_msg, chat_id=chat_id)
                 db.add_message(chat_id, "assistant", f"Created calendar event '{res.get('title', title)}'.")

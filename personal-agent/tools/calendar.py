@@ -73,10 +73,11 @@ def create_event(
     start_time: str,
     duration_minutes: int,
     attendees: Optional[List[str]] = None,
+    event_id: Optional[str] = None,
     service: Any = None,
 ) -> Dict[str, Any]:
     """
-    Create a Google Calendar event on the primary calendar.
+    Create or update a Google Calendar event on the primary calendar.
 
     Args:
         title: Title/summary of the event.
@@ -84,10 +85,11 @@ def create_event(
         start_time: Start time string (e.g. "14:00" or "02:00 PM").
         duration_minutes: Duration of event in minutes.
         attendees: Optional list of attendee email strings.
+        event_id: Optional Google Calendar event ID to update existing event instead of creating duplicate.
         service: Optional pre-constructed Calendar API service instance.
 
     Returns:
-        Structured dict representing created event or error status.
+        Structured dict representing created/updated event or error status.
     """
     try:
         if service is None:
@@ -111,26 +113,43 @@ def create_event(
                 {"email": email.strip()} for email in attendees if isinstance(email, str) and email.strip()
             ]
 
-        created = (
-            service.events()
-            .insert(calendarId="primary", body=event_body)
-            .execute()
-        )
+        is_updated = False
+        res_obj = None
+
+        if event_id and not event_id.startswith("cal_"):
+            try:
+                res_obj = (
+                    service.events()
+                    .patch(calendarId="primary", eventId=event_id, body=event_body)
+                    .execute()
+                )
+                is_updated = True
+            except Exception as patch_err:
+                logger.warning("Could not patch existing calendar event %s: %s", event_id, patch_err)
+                res_obj = None
+
+        if res_obj is None:
+            res_obj = (
+                service.events()
+                .insert(calendarId="primary", body=event_body)
+                .execute()
+            )
 
         attendee_emails = [
             a.get("email")
-            for a in created.get("attendees", [])
+            for a in res_obj.get("attendees", [])
             if isinstance(a, dict) and "email" in a
         ]
 
         return {
             "status": "success",
-            "id": created.get("id"),
-            "title": created.get("summary"),
-            "start": created.get("start", {}).get("dateTime") or created.get("start", {}).get("date"),
-            "end": created.get("end", {}).get("dateTime") or created.get("end", {}).get("date"),
+            "id": res_obj.get("id"),
+            "title": res_obj.get("summary"),
+            "start": res_obj.get("start", {}).get("dateTime") or res_obj.get("start", {}).get("date"),
+            "end": res_obj.get("end", {}).get("dateTime") or res_obj.get("end", {}).get("date"),
             "attendees": attendee_emails,
-            "htmlLink": created.get("htmlLink"),
+            "htmlLink": res_obj.get("htmlLink"),
+            "is_updated": is_updated,
         }
     except Exception as e:
         logger.error("Error in create_event: %s", _sanitize_error(e))

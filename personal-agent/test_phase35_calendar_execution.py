@@ -118,6 +118,7 @@ class TestPhase35CalendarExecution(unittest.TestCase):
             start_time="15:00",
             duration_minutes=60,
             attendees=["john@example.com"],
+            event_id=None,
         )
         self.assertIsNone(db.get_pending_action(action_id))
 

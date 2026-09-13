@@ -1,7 +1,7 @@
 import re
 import json
 import requests
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Tuple
 from datetime import datetime, timedelta, date, time
 from pydantic import ValidationError
 from tenacity import retry, wait_exponential, stop_after_attempt
@@ -160,6 +160,165 @@ def resolve_relative_calendar_date(user_message: str, ref_dt: Optional[datetime]
 
             target = ref_dt + timedelta(days=days_ahead)
             return target.strftime("%Y-%m-%d")
+
+    return None
+
+def _extract_explicit_date(user_message: str, ref_dt: Optional[datetime] = None) -> Optional[str]:
+    """
+    Extract explicit relative or absolute date from user message.
+    Returns YYYY-MM-DD string if user message explicitly specifies a date, else None.
+    """
+    rel_date = resolve_relative_calendar_date(user_message, ref_dt=ref_dt)
+    if rel_date:
+        return rel_date
+    m_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", user_message)
+    if m_iso:
+        return m_iso.group(1)
+    return None
+
+def _extract_explicit_calendar_title(user_message: str) -> Optional[str]:
+    """
+    Detect explicit calendar title modification instructions or creation title clauses in user_message.
+    Matches phrases such as:
+      - 'make the title teps' / 'can u make the title teps and make it 7 pm'
+      - 'change the title to teps'
+      - 'change its title to teps'
+      - 'title should be teps' / 'title to teps'
+      - 'rename it to teps' / 'rename to Team Meeting'
+      - 'called Phase 6 Calendar Test'
+      - 'titled Team Meeting'
+      - 'named Project Review'
+      - 'with title Phase 6 Demo'
+    Returns clean title string if explicitly requested, else None.
+    """
+    if not user_message or not isinstance(user_message, str):
+        return None
+
+    clean = user_message.strip()
+
+    patterns = [
+        r"\b(?:make|change|set|update)\s+(?:the\s+|its\s+)?title(?:\s+(?:to|be|is|=))?\s+(.+)",
+        r"\btitle(?:\s+(?:should\s+be|is|to|=))?\s+(.+)",
+        r"\brename\s+(?:it|that|the\s+event|the\s+meeting)?\s*(?:to)?\s+(.+)",
+        r"\bwith\s+title\s+(.+)",
+        r"\b(?:called|titled|named)\s+(.+)",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, clean, re.IGNORECASE)
+        if m:
+            raw_title = m.group(1).strip()
+            cand = re.split(r"\s+(?:and|also|\&)\s+(?:make|move|change|set|reschedule|push)\b", raw_title, flags=re.IGNORECASE)[0].strip()
+            cand = re.split(r"\s+\b(?:at|for|on)\s+(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{4}-\d{2}-\d{2}|tomorrow|today|friday|monday|tuesday|wednesday|thursday|saturday|sunday)\b", cand, flags=re.IGNORECASE)[0].strip()
+            cand = re.split(r"\s+\b(?:make\s+it|move\s+it|change\s+it|set\s+it|reschedule\s+it)\b", cand, flags=re.IGNORECASE)[0].strip()
+            cand = re.sub(r"^['\"`](.+)['\"`]$", r"\1", cand).strip()
+            
+            noise = {"it", "that", "this", "the event", "the meeting", "event", "meeting", "time", "the time"}
+            if cand and cand.lower() not in noise and not re.match(r"^\d{1,2}(?::\d{2})?\s*(?:am|pm)?$", cand, re.IGNORECASE):
+                return cand
+
+    return None
+
+
+def parse_time_range(
+    text: str,
+    reference_datetime: Optional[datetime] = None,
+    context_start_time: Optional[str] = None
+) -> Optional[Tuple[str, int]]:
+    """
+    Parse a natural-language calendar time-range expression into (start_time_HHMM, duration_minutes).
+    
+    Supported Formats:
+    - 24-hour ranges: '19:00-20:00', '19:00 to 20:00'
+    - Dual AM/PM: '7 PM to 8 PM', '7 AM - 8:30 AM'
+    - Single AM/PM suffix: '7-8 PM', '7 to 8 PM', '7–8 PM', '7-8 AM'
+    - Bare numeric range with context: '7-8', '7 to 8', '7–8' (uses context_start_time for AM/PM resolution)
+
+    Returns:
+    - Tuple (start_time_HHMM, duration_minutes) if successfully parsed, else None.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    clean = text.strip()
+    time_prefix = re.search(r"\b(?:at|from|time\s+is|time:)\b", clean, re.IGNORECASE)
+
+    # 1. 24-Hour Range: e.g. "19:00-20:00", "19:00 to 20:00", "09:00 - 10:30"
+    m_24 = re.search(r"\b(\d{1,2}):(\d{2})\s*(?:-|–|to)\s*(\d{1,2}):(\d{2})\b", clean, re.IGNORECASE)
+    if m_24:
+        h1, m1, h2, m2 = int(m_24.group(1)), int(m_24.group(2)), int(m_24.group(3)), int(m_24.group(4))
+        if 0 <= h1 <= 23 and 0 <= m1 <= 59 and 0 <= h2 <= 23 and 0 <= m2 <= 59:
+            start_mins = h1 * 60 + m1
+            end_mins = h2 * 60 + m2
+            if end_mins > start_mins:
+                return (f"{h1:02d}:{m1:02d}", end_mins - start_mins)
+
+    # 2. Dual AM/PM Range: e.g. "7 PM to 8 PM", "7:00 AM - 8:30 AM", "11 AM to 1 PM"
+    m_dual = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:-|–|to)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", clean, re.IGNORECASE)
+    if m_dual:
+        h1, m1 = int(m_dual.group(1)), int(m_dual.group(2) or 0)
+        ampm1 = m_dual.group(3).lower()
+        h2, m2 = int(m_dual.group(4)), int(m_dual.group(5) or 0)
+        ampm2 = m_dual.group(6).lower()
+
+        if 1 <= h1 <= 12 and 0 <= m1 <= 59 and 1 <= h2 <= 12 and 0 <= m2 <= 59:
+            start_h = (0 if h1 == 12 else h1) if ampm1 == "am" else (12 if h1 == 12 else h1 + 12)
+            end_h = (0 if h2 == 12 else h2) if ampm2 == "am" else (12 if h2 == 12 else h2 + 12)
+            start_mins = start_h * 60 + m1
+            end_mins = end_h * 60 + m2
+            if end_mins > start_mins:
+                return (f"{start_h:02d}:{m1:02d}", end_mins - start_mins)
+
+    # 3. Single AM/PM Suffix Range: e.g. "7-8 PM", "7 to 8 PM", "7–8 PM", "7-8 AM", "11-1 PM"
+    m_single = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:-|–|to)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", clean, re.IGNORECASE)
+    if m_single:
+        h1, m1 = int(m_single.group(1)), int(m_single.group(2) or 0)
+        h2, m2 = int(m_single.group(3)), int(m_single.group(4) or 0)
+        ampm = m_single.group(5).lower()
+
+        if 1 <= h1 <= 12 and 0 <= m1 <= 59 and 1 <= h2 <= 12 and 0 <= m2 <= 59:
+            if ampm == "pm":
+                if h1 > h2 and h1 != 12:
+                    start_h = h1
+                else:
+                    start_h = 12 if h1 == 12 else h1 + 12
+                end_h = 12 if h2 == 12 else h2 + 12
+            else:
+                start_h = 0 if h1 == 12 else h1
+                end_h = 0 if h2 == 12 else h2
+
+            start_mins = start_h * 60 + m1
+            end_mins = end_h * 60 + m2
+            if end_mins > start_mins:
+                return (f"{start_h:02d}:{m1:02d}", end_mins - start_mins)
+
+    # 4. Bare Range: e.g. "7-8", "7 to 8", "7–8", "7:30-8:30"
+    m_bare = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:-|–|to)\s*(\d{1,2})(?::(\d{2}))?\b", clean, re.IGNORECASE)
+    if m_bare:
+        noise_match = re.search(r"\b(?:phase|chapter|chapters|version|step|page|pages|item|items|test)\b", clean, re.IGNORECASE)
+        if noise_match and not time_prefix:
+            return None
+
+        h1, m1 = int(m_bare.group(1)), int(m_bare.group(2) or 0)
+        h2, m2 = int(m_bare.group(3)), int(m_bare.group(4) or 0)
+
+        if 1 <= h1 <= 12 and 0 <= m1 <= 59 and 1 <= h2 <= 12 and 0 <= m2 <= 59:
+            if context_start_time:
+                ctx_h = int(context_start_time.split(":")[0]) if ":" in context_start_time else 9
+                is_pm = (ctx_h >= 12)
+                if is_pm:
+                    start_h = 12 if h1 == 12 else h1 + 12
+                    end_h = 12 if h2 == 12 else h2 + 12
+                else:
+                    start_h = 0 if h1 == 12 else h1
+                    end_h = 0 if h2 == 12 else h2
+
+                start_mins = start_h * 60 + m1
+                end_mins = end_h * 60 + m2
+                if end_mins > start_mins:
+                    return (f"{start_h:02d}:{m1:02d}", end_mins - start_mins)
+            else:
+                return None
 
     return None
 
@@ -456,6 +615,16 @@ def process_calendar_relative_reminder(
     event_title = selected_event.get("title") or "Meeting"
     reminder_msg = f"{event_title} starts in {offset_str}."
 
+    if chat_id:
+        evt_id = str(selected_event.get("id") or f"evt_{event_title}")
+        db.save_context_entity(
+            chat_id=chat_id,
+            entity_type="calendar",
+            entity_id=evt_id,
+            title=event_title,
+            details=start_val
+        )
+
     return {
         "status": "success",
         "message": reminder_msg,
@@ -581,6 +750,65 @@ def validate_tool_call(
                 return overridden
 
     elif tool_call.tool in ("schedule_calendar", "list_calendar"):
+        from datetime import datetime
+        if tool_call.tool == "schedule_calendar":
+            title_val = str(tool_call.args.get("title", "")).strip().lower()
+            generic_cal_refs = {"it", "that", "this", "the meeting", "that meeting", "this meeting", "the event", "that event", "this event", "previous meeting", "the previous meeting", "meeting", "event", ""}
+
+            explicit_date = _extract_explicit_date(user_message, ref_dt=reference_datetime)
+            explicit_title = _extract_explicit_calendar_title(user_message)
+
+            if explicit_title:
+                tool_call.args["title"] = explicit_title
+
+            is_time_phrase = bool(re.search(r"\b(?:the\s+)?time\s+(?:is|should\s+be|to|=)\b", title_val, re.IGNORECASE))
+            if chat_id and (title_val in generic_cal_refs or is_time_phrase or not tool_call.args.get("date") or not explicit_date):
+                cal_ctx = db.get_context_entity(chat_id, "calendar")
+                if cal_ctx:
+                    ctx_title = cal_ctx.get("title")
+                    ctx_details = str(cal_ctx.get("details", ""))
+                    if not explicit_title and (title_val in generic_cal_refs or is_time_phrase) and ctx_title:
+                        tool_call.args["title"] = ctx_title
+                    if not explicit_date and ctx_details:
+                        m_date = re.search(r"(\d{4}-\d{2}-\d{2})", ctx_details)
+                        if m_date:
+                            tool_call.args["date"] = m_date.group(1)
+
+                    # Fix 6.4d & 6.4f-1: Preserve start_time, duration, and event_id from context/time_range
+                    ctx_time = None
+                    if ctx_details:
+                        m_t = re.search(r"\d{4}-\d{2}-\d{2}[T\s](\d{2}:\d{2})", ctx_details)
+                        if m_t:
+                            ctx_time = m_t.group(1)
+                        else:
+                            m_t2 = re.search(r"\b(\d{2}:\d{2})\b", ctx_details)
+                            if m_t2:
+                                ctx_time = m_t2.group(1)
+
+                    range_res = parse_time_range(user_message, reference_datetime=reference_datetime, context_start_time=ctx_time)
+                    if range_res:
+                        tool_call.args["start_time"] = range_res[0]
+                        tool_call.args["duration_minutes"] = range_res[1]
+                    else:
+                        parsed_dt_str = parse_natural_datetime(user_message, reference_datetime=reference_datetime)
+                        if not parsed_dt_str and ctx_details and ctx_time:
+                            tool_call.args["start_time"] = ctx_time
+
+                    if cal_ctx.get("entity_id") and not tool_call.args.get("event_id"):
+                        tool_call.args["event_id"] = cal_ctx.get("entity_id")
+                elif title_val in generic_cal_refs:
+                    overridden = ToolCall(
+                        tool="none",
+                        args={"message": "I couldn't find a recent calendar meeting to reference. Which meeting would you like to schedule or update?"},
+                        reasoning="Generic calendar reference used but no active calendar context was found for this chat."
+                    )
+                    if hasattr(tool_call, "_was_retried"):
+                        overridden._was_retried = tool_call._was_retried
+                    return overridden
+
+            if "duration_minutes" not in tool_call.args or tool_call.args.get("duration_minutes") is None:
+                tool_call.args["duration_minutes"] = 30
+
         schema = TOOL_ARGS_SCHEMAS.get(tool_call.tool)
         if schema:
             try:
@@ -596,7 +824,6 @@ def validate_tool_call(
                     overridden._was_retried = tool_call._was_retried
                 return overridden
 
-        from datetime import datetime
         if tool_call.tool == "schedule_calendar":
             date_val = str(tool_call.args.get("date", "")).strip()
             if date_val:
@@ -641,6 +868,32 @@ def validate_tool_call(
             cleaned = clean_task_title(title_val, user_message)
             if cleaned:
                 tool_call.args["title"] = cleaned
+
+    elif tool_call.tool in ("complete_task", "delete_task"):
+        task_ref = str(tool_call.args.get("task_id", "")).strip().lower()
+        generic_task_refs = {"that", "it", "this", "the task", "that task", "this task", "the previous task", "the item", "that item"}
+        if task_ref in generic_task_refs and chat_id:
+            task_ctx = db.get_context_entity(chat_id, "task")
+            active_tasks = db.list_tasks(chat_id)
+            if not active_tasks:
+                overridden = ToolCall(
+                    tool="none",
+                    args={"message": "You don't have any tasks in your task list."},
+                    reasoning="Task reference used but the task list for this chat is empty."
+                )
+                if hasattr(tool_call, "_was_retried"):
+                    overridden._was_retried = tool_call._was_retried
+                return overridden
+
+            if task_ctx and "deleted" in str(task_ctx.get("details", "")).lower() and len(active_tasks) > 1:
+                overridden = ToolCall(
+                    tool="none",
+                    args={"message": "Which task did you mean? I found multiple tasks in your task list."},
+                    reasoning="Generic task reference used but the stored task context points to a deleted task."
+                )
+                if hasattr(tool_call, "_was_retried"):
+                    overridden._was_retried = tool_call._was_retried
+                return overridden
 
     return tool_call
 
@@ -718,6 +971,73 @@ def _resolve_tool_call_contact(tool_call: ToolCall, user_message: str, chat_id: 
             db.upsert_contact(chat_id, matched["name"], matched["email"])
 
     return tool_call
+
+def format_recent_context(chat_id: str) -> str:
+    """
+    Retrieve and format recent short-term context entities (calendar, task, email) for a chat_id.
+    Returns a delimited context string or empty string if no context exists.
+    """
+    if not chat_id:
+        return ""
+
+    context_lines = []
+
+    # 1. Calendar Context
+    cal_ctx = db.get_context_entity(chat_id, "calendar")
+    if cal_ctx:
+        title = str(cal_ctx.get("title", "")).strip()
+        details = cal_ctx.get("details") or ""
+        entity_id = cal_ctx.get("entity_id") or ""
+        details_str = f" — {details}" if details else ""
+        id_str = f" (ID: {entity_id})" if entity_id else ""
+        context_lines.append(f"Calendar: {title}{details_str}{id_str}")
+
+    # 2. Task Context
+    task_ctx = db.get_context_entity(chat_id, "task")
+    if task_ctx:
+        title = str(task_ctx.get("title", "")).strip()
+        details = task_ctx.get("details") or ""
+        entity_id = task_ctx.get("entity_id") or ""
+        details_str = f" — {details}" if details else ""
+        id_str = f" (ID: {entity_id})" if entity_id else ""
+        context_lines.append(f"Task: {title}{details_str}{id_str}")
+
+    # 3. Email Context
+    email_ctx = db.get_context_entity(chat_id, "email")
+    if email_ctx:
+        title = str(email_ctx.get("title", "")).strip()
+        details_raw = email_ctx.get("details") or ""
+        entity_id = email_ctx.get("entity_id") or ""
+
+        details_summary = ""
+        if details_raw:
+            try:
+                data = json.loads(details_raw)
+                if isinstance(data, dict):
+                    to_val = data.get("to")
+                    subj_val = data.get("subject")
+                    summary_parts = []
+                    if to_val:
+                        summary_parts.append(f"To: {to_val}")
+                    if subj_val:
+                        summary_parts.append(f"Subject: {subj_val}")
+                    if summary_parts:
+                        details_summary = " — " + ", ".join(summary_parts)
+                else:
+                    details_summary = f" — {details_raw}"
+            except Exception:
+                details_summary = f" — {details_raw}"
+
+        id_str = f" (ID: {entity_id})" if entity_id else ""
+        context_lines.append(f"Email: {title}{details_summary}{id_str}")
+
+    if not context_lines:
+        return ""
+
+    lines = ["\n--- RECENT CONTEXT ---"]
+    lines.extend(context_lines)
+    lines.append("--- END RECENT CONTEXT ---")
+    return "\n".join(lines)
 
 def call_agent(
     user_message: str,
@@ -832,6 +1152,10 @@ def call_agent(
             contacts_str = ", ".join([f"{c['name']} <{c['email']}>" for c in saved_contacts])
             system_prompt += f"\nSaved Contacts Context:\n{contacts_str}"
 
+        recent_ctx_str = format_recent_context(chat_id)
+        if recent_ctx_str:
+            system_prompt += f"\n{recent_ctx_str}"
+
     messages = history + [{"role": "user", "content": user_message}]
     raw_response = _ollama_chat(messages, system_prompt)
 
@@ -926,11 +1250,11 @@ def call_agent(
         res.args["body"] = _clean_email_body(res.args["body"], sender_name=sender_name)
 
     if isinstance(res, ToolCall):
-        res = _post_process_contact_intent(res, user_message, reference_datetime=reference_datetime)
+        res = _post_process_contact_intent(res, user_message, chat_id=chat_id, reference_datetime=reference_datetime)
 
     return res
 
-def _post_process_contact_intent(tool_call: ToolCall, user_message: str, reference_datetime: Optional[datetime] = None) -> ToolCall:
+def _post_process_contact_intent(tool_call: ToolCall, user_message: str, chat_id: Optional[str] = None, reference_datetime: Optional[datetime] = None) -> ToolCall:
     """Safeguard to ensure database export and contact deletion intents are always correctly routed."""
     if not tool_call:
         return tool_call
@@ -990,6 +1314,12 @@ def _post_process_contact_intent(tool_call: ToolCall, user_message: str, referen
                 # Strip noise trailing words
                 query_str = re.sub(r"\s+\b(?:contact|contacts|name)\b$", "", query_str, flags=re.IGNORECASE).strip()
                 new_name_str = re.sub(r"\s+\b(?:contact|contacts)\b$", "", new_name_str, flags=re.IGNORECASE).strip()
+
+                cal_title_ref = _extract_explicit_calendar_title(user_message)
+                cal_refs = {"title", "the title", "its title", "time", "the time", "its time", "it", "that", "this", "the event", "the meeting", "event", "meeting"}
+                if query_str.lower() in cal_refs or cal_title_ref:
+                    continue
+
                 if query_str and new_name_str:
                     return ToolCall(
                         tool="rename_contact",
@@ -1009,6 +1339,99 @@ def _post_process_contact_intent(tool_call: ToolCall, user_message: str, referen
                     args={"message": rem_msg, "fire_at": parsed_dt},
                     reasoning="Safeguard: User requested setting a reminder/alarm."
                 )
+
+    # 5. Calendar event creation / rescheduling intent safeguard
+    cal_event_match = re.search(r"\b(?:set|schedule|create)\s+(?:an?|a|the|calendar|\s+)*events?\b", msg_lower, re.IGNORECASE)
+    cal_resched_match = re.search(r"\b(?:make|move|change|reschedule|push)\s+(?:it|that|the\s+time|the\s+meeting|the\s+event|the\s+title|its\s+title|title)\b", msg_lower, re.IGNORECASE)
+    explicit_title_intent = _extract_explicit_calendar_title(user_message)
+    
+    cal_ctx = db.get_context_entity(chat_id, "calendar") if chat_id else None
+    cal_time_phrase_match = re.search(r"\b(?:the\s+)?time\s+(?:is|should\s+be|to|=)\b", msg_lower, re.IGNORECASE)
+
+    # Also detect direct contextual rescheduling requests like "can u make it 3 pm", "make it 3 pm instead", "make the title teps", "the time is 7-8"
+    is_reschedule_intent = bool(
+        cal_resched_match
+        or bool(explicit_title_intent)
+        or ("make it" in msg_lower and any(ch.isdigit() for ch in msg_lower))
+        or bool(cal_time_phrase_match and cal_ctx)
+    )
+    
+    if cal_event_match or is_reschedule_intent:
+        if tool_call.tool != "schedule_calendar":
+            parsed_dt_str = parse_natural_datetime(user_message, reference_datetime=reference_datetime)
+            start_time = "09:00"
+            explicit_date = _extract_explicit_date(user_message, ref_dt=reference_datetime)
+            
+            ctx_title = cal_ctx.get("title") if cal_ctx else None
+            ctx_details = str(cal_ctx.get("details", "")) if cal_ctx else ""
+            
+            ctx_date = None
+            if ctx_details:
+                m_d = re.search(r"(\d{4}-\d{2}-\d{2})", ctx_details)
+                if m_d:
+                    ctx_date = m_d.group(1)
+
+            ctx_time = None
+            if ctx_details:
+                m_t = re.search(r"\d{4}-\d{2}-\d{2}[T\s](\d{2}:\d{2})", ctx_details)
+                if m_t:
+                    ctx_time = m_t.group(1)
+                else:
+                    m_t2 = re.search(r"\b(\d{2}:\d{2})\b", ctx_details)
+                    if m_t2:
+                        ctx_time = m_t2.group(1)
+
+            if explicit_date:
+                date_val = explicit_date
+            elif ctx_date:
+                date_val = ctx_date
+            elif parsed_dt_str and "T" in parsed_dt_str:
+                date_val = parsed_dt_str.split("T")[0]
+            else:
+                now_ref = reference_datetime or datetime.now().astimezone()
+                date_val = now_ref.strftime("%Y-%m-%d")
+            
+            range_res = parse_time_range(user_message, reference_datetime=reference_datetime, context_start_time=ctx_time)
+            duration_val = tool_call.args.get("duration_minutes") if (tool_call and isinstance(tool_call, ToolCall) and tool_call.args.get("duration_minutes")) else 60
+
+            if range_res:
+                start_time = range_res[0]
+                duration_val = range_res[1]
+            elif parsed_dt_str and "T" in parsed_dt_str:
+                start_time = parsed_dt_str.split("T")[1][:5]
+            elif ctx_time and is_reschedule_intent:
+                start_time = ctx_time
+            else:
+                start_time = "09:00"
+            
+            explicit_title = _extract_explicit_calendar_title(user_message)
+
+            if explicit_title:
+                clean_title = explicit_title
+            elif is_reschedule_intent and not cal_event_match and ctx_title:
+                clean_title = ctx_title
+            else:
+                clean_title = re.sub(r"\b(?:set|schedule|create)\s+(?:an?|a|the|calendar|\s+)*events?\b", "", user_message, flags=re.IGNORECASE)
+                clean_title = re.sub(r"\b(?:make|move|change|reschedule|push)\s+(?:it|that|the\s+time|the\s+meeting|the\s+event)\s+(?:to|for|at)?\b", "", clean_title, flags=re.IGNORECASE)
+                clean_title = re.sub(r"\b(?:at|for|on)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b", "", clean_title, flags=re.IGNORECASE)
+                clean_title = re.sub(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", "", clean_title, flags=re.IGNORECASE)
+                clean_title = re.sub(r"\b\d{1,2}:\d{2}\b", "", clean_title, flags=re.IGNORECASE)
+                clean_title = clean_title.strip()
+                if not clean_title:
+                    clean_title = ctx_title or "Event"
+            res_event_id = cal_ctx.get("entity_id") if (is_reschedule_intent and not cal_event_match and cal_ctx) else None
+                
+            return ToolCall(
+                tool="schedule_calendar",
+                args={
+                    "title": clean_title,
+                    "date": date_val,
+                    "start_time": start_time,
+                    "duration_minutes": duration_val,
+                    "event_id": res_event_id,
+                },
+                reasoning="Safeguard: User explicitly requested to schedule/reschedule a calendar event."
+            )
 
     return tool_call
 
