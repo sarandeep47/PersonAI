@@ -109,6 +109,28 @@ The agent will:
 - Add emails to `VIP_SENDERS` to always forward them regardless of LLM decision
 - Change `OLLAMA_MODEL` if you want to try a different model
 
+## Project Roadmap
+
+This project was built in six deliberate phases. Development stopped at Phase 6 by design.
+
+### Completed
+
+| Phase | Description |
+|---|---|
+| Phase 1 | **Core Solidification** — Structured tool-calling pipeline (`ToolCall` schema), hallucination-blocking validation layer, JSON-parse retry logic, eval harness |
+| Phase 2 | **Multi-Task Planning** — `TaskPlan` schema for compound requests, per-task validation, sequential execution with inline Telegram confirmation and stop-on-failure |
+| Phase 3 | **Google Calendar Integration** — Schedule and list Google Calendar events via OAuth; relative date correction; shared OAuth token with Gmail |
+| Phase 4 | **Reminder System** — SQLite-backed alarms, natural-language datetime parsing, calendar-relative reminders, background `AlarmCheckerThread` (30 s polling) |
+| Phase 5 | **Task Manager** — Add, list, complete, and delete tasks; short-term context resolution (pronouns like "complete it" resolve to the last mentioned task) |
+| Phase 6 | **Conversation Memory** — Persistent contact storage with fuzzy matching (≥85% similarity), deleted-contact history scrubbing, short-term context entities across calendar/task/email domains |
+
+### Scoped, Not Built (Intentional)
+
+| Phase | Description | Reason not built |
+|---|---|---|
+| Phase 7 | **Daily Briefing** — `/briefing` command aggregating upcoming calendar events, unread emails, pending tasks, and active reminders into a single Telegram summary | Time and scope constraints; the core assistant was already solid and well-tested at Phase 6. |
+| Phase 8 | **OCR-Based Job Application Drafting** — LinkedIn job screenshot → OCR extraction → tailored application email draft | The highest-risk failure mode identified was the LLM fabricating or exaggerating qualifications in a real outbound email to a recruiter. This risk was judged not worth the value added given the project's existing email validation safeguards were designed to prevent exactly this class of hallucination. |
+
 ## Known Limitations
 
 - **Draft Revision Consistency**: Small local LLMs (e.g. `llama3.2:3b`) can occasionally claim a draft change was made in their reasoning without actually modifying the output text. The system detects when a regenerated draft is identical to the original and flags this to the user with a note ("I couldn't confidently make that change — could you rephrase what you'd like edited?") rather than presenting an unchanged draft as a successful edit.
